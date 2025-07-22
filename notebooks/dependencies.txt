@@ -1,3 +1,6 @@
 ipykernel
 pandas
 requests
+dotenv
+boto3
+pyarrow
