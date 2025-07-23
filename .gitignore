@@ -4,6 +4,9 @@
 # Ignore Virtual Environment
 **/.venv*/
 
+# Ignore Logs
+**/logs/
+
 # Ignore Terraform state files
 *.tfstate
 *.tfstate.*
