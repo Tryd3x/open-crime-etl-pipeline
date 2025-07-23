@@ -4,3 +4,6 @@ requests
 dotenv
 boto3
 pyarrow
+sqlalchemy 
+snowflake-sqlalchemy
+pyyaml
