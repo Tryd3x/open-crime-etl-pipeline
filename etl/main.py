@@ -11,10 +11,19 @@ import yaml
 import boto3
 import shutil
 import requests
-import pandas as pd
+from time import time
 from pathlib import Path
 from pprint import pprint
 from datetime import datetime, timedelta
+
+def benchmark(function):
+    def wrapper(*args, **kwargs):
+        start = time()
+        function(*args, **kwargs)
+        stop = time()
+        print(f"Time taken: {stop-start: .2f} seconds")
+    return wrapper
+
 
 def fetch_crime_data(delta: int, pagesize: int):
     """ TODO
@@ -100,7 +109,7 @@ def clear_dir(dir: Path):
             logger.info(f"Deleted file: {item}")
         shutil.rmtree(dir)
 
-
+@benchmark
 def run_pipeline(bucket_name: str, pagesize: int, delta: int):
     tmp = Path('./tmp')
     s3_path = Path(f"raw/ingest={datetime.now().strftime('%Y-%m-%d')}")
@@ -120,7 +129,7 @@ def run_pipeline(bucket_name: str, pagesize: int, delta: int):
     #  - Insert metadata into log table
     #  - Attributes: ingested_at, records, total_batch, batch_size, status, s3_location
 
-    clear_dir()
+    clear_dir(dir=tmp)
 
     logger.info("Pipeline terminated")
 
@@ -130,7 +139,7 @@ if __name__ == '__main__':
     config = dict()
 
     # Reading Config
-    config_path = Path('./config.yaml')
+    config_path = Path('./config.yml')
     if config_path.exists():
         logger.info(f"Loading Configuration: {config_path.as_posix()}")
         with open(config_path, 'r') as file:
@@ -138,10 +147,11 @@ if __name__ == '__main__':
         logger.info(f"Loaded Configuration")
     
     # Loading Config
-    BUCKET_NAME = config.get('bucket_name', '')
+    BUCKET_NAME = config.get('aws', {}).get('bucket_name', '')
     BATCH_SIZE = config.get('config', {}).get('batchsize', 5000)
     DELTA = config.get('test',{}).get('delta', 7)
 
-
     # Core Logic here
-    run_pipeline()
+    run_pipeline(bucket_name=BUCKET_NAME, pagesize=BATCH_SIZE, delta=DELTA)
+
+    exit(0)
