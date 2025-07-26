@@ -1,8 +1,10 @@
 # Ignore Secrets
 .env
+**/etl/config.yml
 
 # Ignore Virtual Environment
 **/.venv*/
+**/__pycache__/
 
 # Ignore Logs
 **/logs/
