@@ -1,125 +1,103 @@
 from airflow import DAG
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator
+from airflow.utils.state import State
 
 from dotenv import load_dotenv
 load_dotenv()
 
-import os
-import json
-import gzip
-import boto3
-import shutil
-import requests
 from pathlib import Path
 from datetime import datetime, timedelta
 
-import logging
+from crimeapi.extract import fetch_data_api, upload_files_to_s3
+from crimeapi.db.helper import MetaData, create_postgres_conn, create_log_table, initialize_run_log, update_run_log
 
-logger = logging.getLogger("crime_etl")
+import logging
+logger = logging.getLogger(__name__)
 
 default_args = {
     "retries" : 3,
-    "retry_delay" : timedelta(seconds=15),
+    "retry_delay" : timedelta(seconds=10),
 }
 
-# Tasks Implementation
-def save_to_path(path: Path, pagenum: int, data):
-    # Iterates over each batch yielded by fetch_crime_data()
-    filename = f"part-{pagenum:04}.json.gz"
-    filepath = path / filename
+def fetch_metadata(engine, configs: dict, **context):
+    ti = context['ti']
 
-    if not path.exists():
-        logger.info(f"Missing {path.as_posix()}. Creating one...")
-        path.mkdir(parents=True, exist_ok=True)
+    # Connect to DB
+    meta = MetaData()
+    meta.reflect(engine)
 
-    # Staging batch in local storage for upload
-    with gzip.open(filepath,'wt') as f:
-        json.dump(data, f)
-    logger.info(f"Saved file to: {filepath.as_posix()}")
-
-def clear_dir(dir: Path):
-    # Purge the temp folder
-    logger.info(f"Clearing directory: {dir}")
-    if dir.exists():
-        for item in dir.iterdir():
-            item.unlink()
-            logger.info(f"Deleted: {item.as_posix()}")
-        shutil.rmtree(dir)
-
-
-def fetch_data_api(delta: int, pagesize: int, save_path: Path, **context):
-    # Fetch data
-    last_update = (datetime.now() - timedelta(days=delta)).isoformat()[:-3]
-
-    query = f"SELECT * WHERE updated_on >= '{last_update}'"
-
-    url = "https://data.cityofchicago.org/api/v3/views/crimes/query.json"
-    headers = {'X-App-Token' : os.getenv('APP_TOKEN')}
-
-    pagenum = 1
-    while True:
-        body = {
-            'query' : query,
-            'page' : {
-                'pageNumber' : pagenum,
-                'pageSize' : pagesize
-            },
-            "includeSynthetic": False
-        }
-        logger.info("Fetching from API")
-        res = requests.post(
-            url,
-            json=body,
-            headers=headers
-        )
-
-        if res.status_code != 200 or res.json() == [] or pagenum >= 50:
-            break
-        
-        # Save data to local storage
-        save_to_path(path=save_path, pagenum=pagenum, data=res.json())
-        
-        pagenum += 1
-
-def upload_to_s3(bucket_name: str, filepath: Path, object_key: Path):
-    # upload to s3
-    aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
-    aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-    region_name = os.getenv("AWS_REGION")
-
-    client = boto3.client(
-        's3',
-        aws_access_key_id=aws_access_key,
-        aws_secret_access_key=aws_secret_key,
-        region_name=region_name
-    )
-
-    logger.info(f"Uploading to s3://{bucket_name}")
-    for file in filepath.iterdir():
-        filename = str(file).split("/")[-1]
-
-        # Upload to s3
-        client.upload_file(Filename=file.as_posix(), Bucket=bucket_name, Key=f"{(object_key / filename).as_posix()}")
-
-        logger.info(f"Uploaded file to: s3://{bucket_name}/{(object_key / filename).as_posix()}")
-
-    # clear dir
-    clear_dir(dir=filepath)
-    pass
+    # Check if table exists, else create one
+    if 'pipeline_logs' not in meta.tables.keys():
+        logger.info("Table 'pipeline_logs' does not exist'")
+        create_log_table(engine) 
     
+    # Initialize Log
+    run_id = initialize_run_log(engine=engine, config=configs)
+
+    ti.xcom_push(key='pipeline_run_id', value=run_id) 
+
+def fetch_data_from_api(engine, delta: int, pagesize: int, save_path: str, **context):
+    ti = context['ti']
+    try:
+        pagenum = fetch_data_api(delta, pagesize, save_path)
+        ti.xcom_push(key="batch_count", value=pagenum)
+    except Exception as e:
+        logger.error(e)
+        run_id = ti.xcom_pull(task_ids='fetch_metadata', key='pipeline_run_id')
+        update_run_log(engine=engine, run_id=run_id, status="FAILED")
+        raise
+
+def upload_to_s3(bucket_name, source_path, destination_path, **context):
+    ti = context['ti']
+
+    file_location = upload_files_to_s3(bucket_name, source_path, destination_path)
+
+    ti.xcom_push(key='file_location', value=file_location)
+
+def update_metdata(engine, **context):
+    
+    ti = context['ti']
+    
+    meta = MetaData()
+    meta.reflect(bind=engine)
+
+    run_id = ti.xcom_pull(task_ids='fetch_metadata', key="pipeline_run_id")
+    batch_count = ti.xcom_pull(task_ids='fetch_api_data', key="batch_count")
+    file_location = ti.xcom_pull(task_ids='upload_to_s3', key="file_location")
+
+    dag_run = ti.get_dagrun()
+    upstream_task_ids = ti.task.upstream_task_ids
+    failed_task = False
+    for task_id in upstream_task_ids:
+        task_instance = dag_run.get_task_instance(task_id)
+        if task_instance and task_instance.state in {State.FAILED, State.UPSTREAM_FAILED}:
+            failed_task = True
+
+    status = 'FAILED' if failed_task else 'SUCCESS'
+
+    update_run_log(engine=engine, run_id=run_id, status=status, batch_count=batch_count, file_location=file_location)
 
 # Configs
 # - delta
 # - batchsize
 # - bucketname
 
-tmp = Path("./tmp")
-batch_size = 5000
+batch_size = 1000
 delta = 29
+db_params = {
+    "host": 'host.docker.internal',
+    "port": '5433',
+    "username": 'admin',
+    "password": 'admin',
+    "db": 'mydb',
+}
 
 bucket_name = "open-crime-etl"
-s3_path = Path(f"raw/ingest={datetime.now().strftime('%Y-%m-%d')}")
+tmp = "./tmp"
+s3_destination = "raw/"
+
+engine = create_postgres_conn(**db_params)
 
 with DAG(
     dag_id="crime_etl",
@@ -129,14 +107,26 @@ with DAG(
     default_args=default_args,
     catchup=False
 ) as dag:
-    # Fetch Metadata If exists, else create MetaData table
-    # t1 = EmptyOperator(task_id="fetch_metadata")
+    
+    # Fetch Metadata
+    t1 = PythonOperator(
+        task_id="fetch_metadata",
+        python_callable=fetch_metadata,
+        op_kwargs={
+            "engine" : engine,
+            "configs" : {
+                "batchsize" : batch_size,
+                "delta" : delta
+            }
+        }
+    )
 
     # Fetch data from API
     t2 = PythonOperator(
         task_id="fetch_api_data",
-        python_callable=fetch_data_api,
+        python_callable=fetch_data_from_api,
         op_kwargs={
+            "engine" : engine,
             "delta" : delta,
             "pagesize" : batch_size,
             "save_path" : tmp,
@@ -149,8 +139,8 @@ with DAG(
         python_callable=upload_to_s3,
         op_kwargs={
             "bucket_name" : bucket_name,
-            "filepath" : tmp, 
-            "object_key" : s3_path 
+            "source_path" : tmp, 
+            "destination_path" : s3_destination 
         }
     )
 
@@ -162,10 +152,19 @@ with DAG(
     # t5_1 = EmptyOperator(task_id="load_from_s3_to_snowflake") 
     # # - Postgres
     # t5_2 = EmptyOperator(task_id="load_from_s3_to_postgres") 
+
+    t6 = PythonOperator(
+        task_id="update_metadata",
+        python_callable=update_metdata,
+        op_kwargs={
+            "engine" : engine,
+        },
+        trigger_rule = 'all_done'
+    )
     
-    # # Validate both DBs are synced
-    # t6 = EmptyOperator(task_id="validate_sync")
+    # Validate both DBs are synced
+    # t7 = EmptyOperator(task_id="validate_sync")
 
 
-    t2 >> t3
+    t1 >> t2 >> t3 >> t6
     # t1 >> t2 >> t3 >> t4 >> [t5_1, t5_2] >> t6
