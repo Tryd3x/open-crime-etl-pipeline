@@ -14,10 +14,10 @@ def create_log_table(engine: Engine) -> Table:
         Column("start_time", TIME),
         Column("end_time", TIME),
         Column("status", String(10)),
-        Column("batch_count", Integer),
-        Column("batch_size", Integer),
+        # Column("batch_count", Integer),
+        # Column("batch_size", Integer),
         Column("config", Text),
-        Column("file_location", Text)
+        # Column("file_location", Text)
     )
 
     logger.info("Creating Table 'pipeline_logs'")

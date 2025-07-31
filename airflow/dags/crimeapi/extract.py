@@ -8,17 +8,14 @@ from crimeapi.utils.helper import save_to_path
 
 logger = logging.getLogger(__name__)
 
-def fetch_data_api(delta, pagesize: int, save_path: str) -> int:
+def fetch_data_api(start_date, end_date, pagesize: int, save_path: str) -> None:
     """ TODO
     - Two modes: full or incremental
     - Default Date: 2024-01-01
     - Methodology: query month by month i.e relativedelta(months=1)
     """
 
-    last_update = (datetime.now() - timedelta(days=delta)).isoformat()[:-3]
-
-    query = f"SELECT * WHERE updated_on >= '{last_update}'"
-
+    query = f"SELECT * WHERE updated_on BETWEEN '{start_date}' AND '{end_date}'"
     url = "https://data.cityofchicago.org/api/v3/views/crimes/query.json"
     headers = {'X-App-Token' : os.getenv('APP_TOKEN')}
 
@@ -38,14 +35,13 @@ def fetch_data_api(delta, pagesize: int, save_path: str) -> int:
         if res.status_code != 200:
             raise Exception(f"API returned status {res.status_code} at page {pagenum}")
         
-        if pagenum >= 50:
-            raise Exception("Reached page limit 50, stopping to prevent infinite loop")
+        if pagenum >= 500:
+            raise Exception("Reached page limit 500, stopping to prevent infinite loop")
         
         if res.json() == []:
-            return pagenum-1
+            return
         
-        # Save data to local storage
-        save_to_path(path=save_path, pagenum=pagenum, data=res.json())
+        save_to_path(save_to=save_path, date=start_date,  pagenum=pagenum, data=res.json())
         
         pagenum += 1
 

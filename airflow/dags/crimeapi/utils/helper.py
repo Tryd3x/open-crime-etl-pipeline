@@ -35,15 +35,20 @@ def generate_date_range(start_date: datetime = None, end_date: datetime = None, 
         
     return date_range
 
-def save_to_path(path: str, pagenum: int, data) -> None:
+def save_to_path(save_to: str, date: str, pagenum: int, data: dict) -> None:
     """ TODO
     - Remap folder structure
     - Example: tmp/year/month/part
     """
+    parsed_date = datetime.strptime(date, '%Y-%m-%dT%H:%M:%S.%f')
 
-    path = Path(path)
+    root = Path(save_to) # ./tmp
+    year = str(parsed_date.year) # ./2024
+    month = f"{parsed_date.month:02}" # ./01
+
+    path = root / year / month
     filename = f"part-{pagenum:04}.json.gz"
-    filepath = path / filename
+    filepath =  path / filename
 
     if not path.exists():
         logger.info(f"Missing {path.as_posix()}. Creating one...")
@@ -60,6 +65,9 @@ def clear_dir(dir: str) -> None:
     dir = Path(dir)
     if dir.exists():
         for item in dir.iterdir():
-            item.unlink()
-            logger.info(f"Deleted: {item.as_posix()}")
-        shutil.rmtree(dir)
+            if item.is_file():
+                item.unlink()
+                logger.info(f"Deleted file: {item.as_posix()}")
+            elif item.is_dir():
+                shutil.rmtree(item)
+                logger.info(f"Deleted directory: {item.as_posix()}")
