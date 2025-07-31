@@ -1,8 +1,0 @@
-name: open-crime-etl-pipeline
-config:
-  batchsize: 5000
-aws:
-  bucket_name: open-crime-etl
-test:
-  delta: 29
-
