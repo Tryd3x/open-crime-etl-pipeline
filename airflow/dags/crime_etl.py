@@ -4,7 +4,6 @@ from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.utils.state import State
 from airflow.utils.trigger_rule import TriggerRule
 
-
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -14,9 +13,10 @@ from datetime import datetime, timedelta
 from crimeapi.extract import fetch_data_api
 from crimeapi.load import upload_files_to_s3
 from crimeapi.common.connect import create_postgres_conn, create_aws_conn
-from crimeapi.utils.helper import generate_date_range
+from crimeapi.utils.helper import generate_date_range, save_to_path, str_to_date, clear_dir
 from crimeapi.db.helper import MetaData, initialize_run_log, update_run_log
 from crimeapi.db.tables import create_log_table
+from crimeapi.utils.custom_exceptions import APIPageFetchError
 
 import logging
 logger = logging.getLogger(__name__)
@@ -53,29 +53,56 @@ def decide_load_type(**context):
 
 def full_load(engine, batchsize: int, save_path: str, **context):
     # Criteria to fire this off
-    # - no source_last_updated
+    # - missing source_last_updated
 
     """
     This function possibly handles the generation of dates utilized to query the API and calls fetch_data_api()
+    - Avoids OOM by utilizing generator to fetch data from API
+    - On failure, resume from last successful page
+    - On Airflow retry, waits till retries are exhausted before pushing update to log table
     """
     ti = context['ti']
-    start_date = datetime(2024,1,1)
+
+    # Check if there are any persistent state in xcom before generating date_ranges
+    last_checkpoint = ti.xcom_pull(task_ids="full_load", key="last_checkpoint") or {}
+
+    last_page = last_checkpoint.get('last_page', None)
+    start_date = str_to_date(last_checkpoint.get('last_date')) if last_checkpoint.get('last_date') else datetime(2025,1,1)
     end_date = datetime.now()
 
     date_ranges = generate_date_range(start_date=start_date, end_date=end_date)
 
-    # Iterate over each date_range, call fetch_data_api()
     try:
         for dr in date_ranges:
             start = dr.get('start_date')
             end = dr.get('end_date')
-            fetch_data_api(start_date=start, end_date=end, pagesize=batchsize, save_path=save_path)
-    except Exception as e:
-        logger.error(e)
-        run_id = ti.xcom_pull(task_ids='fetch_metadata', key='pipeline_run_id')
-        update_run_log(engine=engine, run_id=run_id, status="FAILED")
-        raise
+            
+            for pagenum, data in fetch_data_api(start_date=start, end_date=end, pagesize=batchsize, resume_page=last_page):
 
+                # Save to path
+                save_to_path(save_to=save_path, date=start, pagenum=pagenum, data=data)
+
+    except APIPageFetchError as e:
+        logger.exception("APIPageFetchError occured")
+
+        # Persist date and pagenum on failure
+        ti.xcom_push(key="last_checkpoint", value={'last_page' : e.pagenum, 'last_date' : e.date})
+        
+        if ti.try_number == ti.max_tries:
+            logger.info("Max retries reached.")
+            run_id = ti.xcom_pull(task_ids='fetch_metadata', key='pipeline_run_id')
+
+            # Clear temp directory
+            clear_dir(save_path)
+
+            # Clear persistent states from xcom
+            logging.info("Clearing XCom state")
+            ti.xcom_clear()
+
+            # Update log
+            update_run_log(engine=engine, run_id=run_id, status="FAILED")
+        raise    
+    
 def incremental_load(engine, batchsize: int, save_path: str, **context):
     # Crieteria to fire this off
     # - source_last_updated
@@ -96,20 +123,24 @@ def incremental_load(engine, batchsize: int, save_path: str, **context):
             start = dr.get('start_date')
             end = dr.get('end_date')
 
-            # Need to decouple pagenum since it is now incrementally loaded and you dont want to save it as a seperate part-xxxx.json.gz. Might need to fetch metadata from s3 key about the count and use that count by appending and storing in that same folder
+            # Need to decouple pagenum since it is now incrementally loaded and you dont want to save it as a seperate part-xxxx.json.gz. Might need to fetch metadata from s3 key about the count and use that count by appending and storing in that same folder 
             fetch_data_api(start_date=start, end_date=end, pagesize=batchsize, save_path=save_path)
+
     except Exception as e:
         logger.error(e)
         run_id = ti.xcom_pull(task_ids='fetch_metadata', key='pipeline_run_id')
-        update_run_log(engine=engine, run_id=run_id, status="FAILED")
-        raise
+        if ti.try_number == ti.max_tries:
+            update_run_log(engine=engine, run_id=run_id, status="FAILED")
+        raise    
 
 def load_s3_to_postgres(**context):
     # Check if crime table exists, else create them
     # Load from s3 into postgres
+
+
     pass
 
-def load_s3_to_postgres(**context):
+def load_s3_to_snowflake(**context):
     pass
 
 def update_metdata(engine, **context):
@@ -146,7 +177,7 @@ def update_metdata(engine, **context):
 # - bucketname
 
 config = {
-    "batchsize" : 1000,
+    "batchsize" : 5000,
 }
 
 db_params = {
@@ -234,20 +265,18 @@ with DAG(
     # # - Postgres
     # load_postgres = EmptyOperator(task_id="load_from_s3_to_postgres") 
 
-    # update_metadata = PythonOperator(
-    #     task_id="update_metadata",
-    #     python_callable=update_metdata,
-    #     op_kwargs={
-    #         "engine" : engine,
-    #     },
-    #     trigger_rule = 'all_done'
-    # )
+    update_metadata = PythonOperator(
+        task_id="update_metadata",
+        python_callable=update_metdata,
+        op_kwargs={
+            "engine" : engine,
+        },
+        trigger_rule = 'all_done'
+    )
     
     # # Validate both DBs are synced
     # validate = EmptyOperator(task_id="validate_sync")
 
     # # Dag with full vs increment load
-    check_metadata >> decide_load_type >> [full_data_load, incremental_data_load]  >> upload_s3 
+    check_metadata >> decide_load_type >> [full_data_load, incremental_data_load]  >> upload_s3 >> update_metadata
     # >> [load_snowflake, load_postgres] >> update_metadata >> validate
-
-    # check_metadata >> fetch_data >> upload_s3 >> update_metadata 

@@ -1,6 +1,5 @@
 import logging
 from pathlib import Path
-from datetime import datetime
 from crimeapi.utils.helper import clear_dir
 
 logger = logging.getLogger(__name__)

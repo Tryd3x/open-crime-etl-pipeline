@@ -31,7 +31,7 @@ def initialize_run_log(engine: Engine, config: dict) -> int:
         last_updated = result.scalar()
         return (run_id, last_updated)
     
-def update_run_log(engine: Engine, run_id: int, status : str, file_location: str = None, source_updated_on: datetime = None) -> None:
+def update_run_log(engine: Engine, run_id: int, status : str, source_updated_on: datetime = None) -> None:
     logger.info(f"Updating pipeline status to '{status}' for run_id={run_id}")
 
     meta = MetaData()
@@ -45,7 +45,6 @@ def update_run_log(engine: Engine, run_id: int, status : str, file_location: str
 
     if status.upper() == "SUCCESS":
         values.update({
-            'file_location' : file_location,
             'source_updated_on' : source_updated_on
         })
         

@@ -8,6 +8,12 @@ from dateutil.relativedelta import relativedelta
 
 logger = logging.getLogger(__name__)
 
+def str_to_date(str_date: str, format: str = '%Y-%m-%dT%H:%M:%S.%f') -> datetime:
+    return datetime.strptime(str_date, format)
+
+def date_to_str(date: datetime, format: str = '%Y-%m-%dT%H:%M:%S.%f') -> str:
+    return date.strftime(format)[:-3]
+
 def generate_date_range(start_date: datetime = None, end_date: datetime = None, delta: relativedelta = None) -> list:
     date_range = []
 
@@ -19,28 +25,24 @@ def generate_date_range(start_date: datetime = None, end_date: datetime = None, 
         if start_date + delta > end_date:
             date_range.append(
                 {
-                    'start_date' : start_date.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3],
-                    'end_date' : end_date.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
+                    'start_date' : date_to_str(start_date),
+                    'end_date' : date_to_str(end_date)
                 }
             )
-            break
         else:
             date_range.append(
                 {
-                    'start_date' : start_date.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3],
-                    'end_date' : (start_date + delta).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
+                    'start_date' : date_to_str(start_date),
+                    'end_date' : date_to_str(start_date + delta)
                 }
             )
-            start_date += delta
+        start_date += delta
         
     return date_range
 
-def save_to_path(save_to: str, date: str, pagenum: int, data: dict) -> None:
-    """ TODO
-    - Remap folder structure
-    - Example: tmp/year/month/part
-    """
-    parsed_date = datetime.strptime(date, '%Y-%m-%dT%H:%M:%S.%f')
+def save_to_path(save_to: str, date: str, pagenum: int, data: list) -> None:
+    
+    parsed_date = str_to_date(date)
 
     root = Path(save_to) # ./tmp
     year = str(parsed_date.year) # ./2024

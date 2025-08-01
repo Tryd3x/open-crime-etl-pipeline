@@ -1,26 +1,19 @@
 import os
-import boto3
 import logging
 import requests
-from datetime import datetime, timedelta
 
-from crimeapi.utils.helper import save_to_path
+from crimeapi.utils.custom_exceptions import APIPageFetchError
 
 logger = logging.getLogger(__name__)
 
-def fetch_data_api(start_date, end_date, pagesize: int, save_path: str) -> None:
-    """ TODO
-    - Two modes: full or incremental
-    - Default Date: 2024-01-01
-    - Methodology: query month by month i.e relativedelta(months=1)
-    """
+def fetch_data_api(start_date: str, end_date: str, pagesize: int, resume_page: int = None):
 
     query = f"SELECT * WHERE updated_on BETWEEN '{start_date}' AND '{end_date}'"
     url = "https://data.cityofchicago.org/api/v3/views/crimes/query.json"
     headers = {'X-App-Token' : os.getenv('APP_TOKEN')}
 
-    pagenum = 1
     logger.info("Fetching data from API")
+    pagenum = resume_page if resume_page else 1
     while True:
         body = {
             'query' : query,
@@ -30,18 +23,20 @@ def fetch_data_api(start_date, end_date, pagesize: int, save_path: str) -> None:
             },
             "includeSynthetic": True
         }
-        res = requests.post(url, json=body, headers=headers)
+
+        try:
+            res = requests.post(url, json=body, headers=headers)
+        except requests.RequestException as e:
+            raise APIPageFetchError(f"Request failed at page {pagenum} for date {start_date}: {e}", pagenum=pagenum, date=start_date) from e            
 
         if res.status_code != 200:
-            raise Exception(f"API returned status {res.status_code} at page {pagenum}")
+            raise APIPageFetchError(f"API returned status {res.status_code} at page {pagenum}", pagenum=pagenum, date=start_date)
         
-        if pagenum >= 500:
-            raise Exception("Reached page limit 500, stopping to prevent infinite loop")
-        
-        if res.json() == []:
-            return
-        
-        save_to_path(save_to=save_path, date=start_date,  pagenum=pagenum, data=res.json())
+        data = res.json()
+
+        if not data:
+            break
+
+        yield pagenum, data
         
         pagenum += 1
-
