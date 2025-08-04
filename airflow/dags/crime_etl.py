@@ -14,7 +14,7 @@ from crimeapi.extract import fetch_data_api
 from crimeapi.load import upload_files_to_s3
 from crimeapi.common.connect import create_postgres_conn, create_aws_conn
 from crimeapi.utils.helper import generate_date_range, save_to_path, str_to_date, clear_dir
-from crimeapi.db.helper import MetaData, initialize_run_log, update_run_log
+from crimeapi.db.helper import MetaData, initialize_run_log, update_run_log, get_last_source_update
 from crimeapi.db.tables import create_log_table
 from crimeapi.utils.custom_exceptions import APIPageFetchError
 
@@ -106,10 +106,6 @@ def full_load(engine, batchsize: int, save_path: str, **context):
 def incremental_load(engine, batchsize: int, save_path: str, **context):
     # Crieteria to fire this off
     # - source_last_updated
-
-    """
-    This function possibly handles the generation of dates utilized to query the API and calls fetch_data_api()
-    """
     
     ti = context['ti']
     start_date = ti.xcom_pull(task_ids='fetch_metadata', key='source_last_updated_on')
@@ -126,10 +122,24 @@ def incremental_load(engine, batchsize: int, save_path: str, **context):
             # Need to decouple pagenum since it is now incrementally loaded and you dont want to save it as a seperate part-xxxx.json.gz. Might need to fetch metadata from s3 key about the count and use that count by appending and storing in that same folder 
             fetch_data_api(start_date=start, end_date=end, pagesize=batchsize, save_path=save_path)
 
-    except Exception as e:
-        logger.error(e)
-        run_id = ti.xcom_pull(task_ids='fetch_metadata', key='pipeline_run_id')
+    except APIPageFetchError as e:
+        logger.exception("APIPageFetchError occured")
+
+        # Persist date and pagenum on failure
+        ti.xcom_push(key="last_checkpoint", value={'last_page' : e.pagenum, 'last_date' : e.date})
+        
         if ti.try_number == ti.max_tries:
+            logger.info("Max retries reached.")
+            run_id = ti.xcom_pull(task_ids='fetch_metadata', key='pipeline_run_id')
+
+            # Clear temp directory
+            clear_dir(save_path)
+
+            # Clear persistent states from xcom
+            logging.info("Clearing XCom state")
+            ti.xcom_clear()
+
+            # Update log
             update_run_log(engine=engine, run_id=run_id, status="FAILED")
         raise    
 
@@ -151,7 +161,7 @@ def update_metdata(engine, **context):
     meta.reflect(bind=engine)
 
     run_id = ti.xcom_pull(task_ids='fetch_metadata', key="pipeline_run_id")
-    last_update = None # Fetch this from DB after inserting
+    last_update = None
 
     dag_run = ti.get_dagrun()
     all_upstream_task_ids = ti.task.get_flat_relatives(upstream=True)

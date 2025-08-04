@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy.engine.url import URL
 from sqlalchemy import MetaData, insert, update, select, func
 from sqlalchemy.engine.base import Engine
+from datetime import date
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,18 @@ def update_run_log(engine: Engine, run_id: int, status : str, source_updated_on:
             'source_updated_on' : source_updated_on
         })
         
-
     with engine.begin() as conn:
         st = update(log_table).where(log_table.c.run_id == run_id).values(**values)
         conn.execute(st)
+
+# This is incorrect, must fetch the source date from the data table and not the meta table
+def get_last_source_update(engine: Engine) -> date:
+    meta = MetaData()
+    meta.reflect(engine)
+
+    log_table = meta.tables['pipeline_logs']
+    with engine.begin() as conn:
+        st = select(func.max(log_table.c.ingested_at))
+        result = conn.execute(st)
+        last_update = result.scalar()
+        return last_update

@@ -14,10 +14,7 @@ def create_log_table(engine: Engine) -> Table:
         Column("start_time", TIME),
         Column("end_time", TIME),
         Column("status", String(10)),
-        # Column("batch_count", Integer),
-        # Column("batch_size", Integer),
         Column("config", Text),
-        # Column("file_location", Text)
     )
 
     logger.info("Creating Table 'pipeline_logs'")
@@ -57,16 +54,15 @@ def create_crime_table(engine: Engine) -> Table:
         Column("arrest", String),
         Column("domestic", String),
         Column("beat", Integer),
+        Column("district", Integer),
         Column("ward", Integer),
-        Column("fbi_cd", String),
+        Column("community_area", Integer),
+        Column("fbi_code", String),
         Column("x_coordinate", Integer),
         Column("y_coordinate", Integer),
-        Column("updated_at", DateTime(timezone=True)),
         Column("latitude", Float),
         Column("longitude", Float),
-
-        Column("created_at", DateTime(timezone=True)),
-        Column("version", String)
+        Column("source_updated_on", DateTime(timezone=True)),
     )
     
     logger.info("Creating Table 'crime'")
