@@ -9,13 +9,17 @@ load_dotenv()
 
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
+import gzip
+import json
 
 from crimeapi.extract import fetch_data_api
-from crimeapi.load import upload_files_to_s3
+from crimeapi.load import upload_files_to_s3, download_files_from_s3
+from crimeapi.transform import transform
 from crimeapi.common.connect import create_postgres_conn, create_aws_conn
 from crimeapi.utils.helper import generate_date_range, save_to_path, str_to_date, clear_dir
-from crimeapi.db.helper import MetaData, initialize_run_log, update_run_log, get_last_source_update
-from crimeapi.db.tables import create_log_table
+from crimeapi.db.helper import MetaData, initialize_run_log, update_run_log, load_to_postgres, get_last_source_update
+from crimeapi.db.tables import create_log_table, create_crime_table
 from crimeapi.utils.custom_exceptions import APIPageFetchError
 
 import logging
@@ -39,10 +43,11 @@ def fetch_metadata(engine, configs: dict, **context):
         create_log_table(engine) 
     
     # Initialize Log
-    run_id, last_updated = initialize_run_log(engine=engine, config=configs)
+    run_id, last_source_update, last_load_date = initialize_run_log(engine=engine, config=configs)
 
     ti.xcom_push(key='pipeline_run_id', value=run_id)
-    ti.xcom_push(key='source_last_updated_on', value=last_updated)
+    ti.xcom_push(key='source_last_updated_on', value=last_source_update)
+    ti.xcom_push(key='last_load_date', value=last_load_date)
 
 def decide_load_type(**context):
     ti = context['ti']
@@ -143,12 +148,55 @@ def incremental_load(engine, batchsize: int, save_path: str, **context):
             update_run_log(engine=engine, run_id=run_id, status="FAILED")
         raise    
 
-def load_s3_to_postgres(**context):
-    # Check if crime table exists, else create them
-    # Load from s3 into postgres
+def upload_to_s3(client, bucket_name, source_path, destination_path):
+    """TODO
+    - Need to add `try except` here
+    """
+    # Upload
+    upload_files_to_s3(client, bucket_name, source_path, destination_path)
+
+    # Clear tmp directory
+    clear_dir(source_path)
 
 
-    pass
+def load_s3_to_postgres(engine, client, bucket_name, source_path, destination_path, batch_insert_size:int, **context):
+    
+    ti = context['ti']
+
+    meta = MetaData()
+    meta.reflect(engine)
+    crime_table = None
+    if 'crime' not in meta.tables.keys():
+        logger.info("Missing Table: 'crime'")
+        crime_table = create_crime_table(engine)
+    else: 
+        crime_table = meta.tables['crime']
+
+    # Scan pipeline_logs and fetch the last ingested_at with status = 'SUCCESS', if None what does it mean?
+    last_load_date = ti.xcom_pull(task_ids="fetch_metadata", key="last_load_date")
+
+    # Bulk Download from s3
+    download_files_from_s3(client=client, bucket_name=bucket_name, source_path=source_path, destination_path=destination_path, last_load_date=last_load_date)
+
+    # Stream - Uncompress -> Load -> Transform -> Batch Insert
+    logger.info("Starting Uncompress")
+    for file in Path(destination_path).rglob("*.gz"):
+        # Unzip
+        with gzip.open(file.as_posix(), 'rt') as f:
+
+            # Load
+            logger.info(f"Loading JSON: {file.as_posix()} ")
+            data = json.load(f)
+            
+            # Transform
+            df = transform(data)
+
+            # Batch Insert
+            logger.info(f"Performing Batch insert: {file.as_posix()}")
+            load_to_postgres(engine=engine, batchsize=batch_insert_size, table=crime_table, df=df)
+    
+    # Clean up dir
+    clear_dir(destination_path)
 
 def load_s3_to_snowflake(**context):
     pass
@@ -161,7 +209,8 @@ def update_metdata(engine, **context):
     meta.reflect(bind=engine)
 
     run_id = ti.xcom_pull(task_ids='fetch_metadata', key="pipeline_run_id")
-    last_update = None
+    last_update = get_last_source_update(engine)
+    logger.info(f"Last source_updated_on: {last_update}")
 
     dag_run = ti.get_dagrun()
     all_upstream_task_ids = ti.task.get_flat_relatives(upstream=True)
@@ -188,6 +237,7 @@ def update_metdata(engine, **context):
 
 config = {
     "batchsize" : 5000,
+    "batch_insert_size": 1000
 }
 
 db_params = {
@@ -259,7 +309,7 @@ with DAG(
     # Upload to s3
     upload_s3 = PythonOperator(
         task_id="upload_to_s3",
-        python_callable=upload_files_to_s3,
+        python_callable=upload_to_s3,
         op_kwargs={
             "client" : s3_client,
             "bucket_name" : bucket_name,
@@ -272,8 +322,20 @@ with DAG(
     # # Load from s3 to Dbs
     # # - Snowflake
     # load_snowflake = EmptyOperator(task_id="load_from_s3_to_snowflake") 
-    # # - Postgres
-    # load_postgres = EmptyOperator(task_id="load_from_s3_to_postgres") 
+
+    # - Postgres
+    load_postgres = PythonOperator(
+        task_id="load_from_s3_to_postgres",
+        python_callable=load_s3_to_postgres,
+        op_kwargs={
+            "engine" : engine,
+            "client" : s3_client,
+            "bucket_name" : bucket_name,
+            "source_path" : s3_destination, 
+            "destination_path" : tmp,
+            "batch_insert_size" : config.get('batch_insert_size')
+        }
+    ) 
 
     update_metadata = PythonOperator(
         task_id="update_metadata",
@@ -288,5 +350,5 @@ with DAG(
     # validate = EmptyOperator(task_id="validate_sync")
 
     # # Dag with full vs increment load
-    check_metadata >> decide_load_type >> [full_data_load, incremental_data_load]  >> upload_s3 >> update_metadata
+    check_metadata >> decide_load_type >> [full_data_load, incremental_data_load]  >> upload_s3 >> load_postgres >> update_metadata
     # >> [load_snowflake, load_postgres] >> update_metadata >> validate

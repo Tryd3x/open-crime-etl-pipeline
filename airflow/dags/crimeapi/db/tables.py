@@ -65,6 +65,6 @@ def create_crime_table(engine: Engine) -> Table:
         Column("source_updated_on", DateTime(timezone=True)),
     )
     
-    logger.info("Creating Table 'crime'")
+    logger.info("Creating Table: 'crime'")
     meta.create_all(bind=engine, checkfirst=True) # does not re-create table if it already exists
     return table
