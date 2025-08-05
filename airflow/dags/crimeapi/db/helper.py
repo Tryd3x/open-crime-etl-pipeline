@@ -37,22 +37,29 @@ def initialize_run_log(engine: Engine, config: dict) -> int:
         last_load_date = result.scalar()
         return (run_id, last_source_update, last_load_date)
     
-def update_run_log(engine: Engine, run_id: int, status : str, source_updated_on: datetime = None) -> None:
-    logger.info(f"Updating pipeline status to '{status}' for run_id={run_id}")
+def update_run_log(engine: Engine, run_id: int, status : str = None, mode: str = None, source_updated_on: datetime = None) -> None:
 
     meta = MetaData()
     meta.reflect(engine)
     log_table = meta.tables['pipeline_logs']
 
-    values = {
-        'end_time' : datetime.now(timezone.utc).strftime("%H:%M:%S"),
-        'status' : status
-    }
+    values = {}
 
-    if status.upper() == "SUCCESS":
+    if status and status.upper() in ["SUCCESS", "FAILED"]:
         values.update({
-            'source_updated_on' : source_updated_on
-        })
+            'status' : status,
+            'end_time' : datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            }
+        )
+
+    if mode:
+        values.update({'mode' : mode})
+
+    if source_updated_on:
+        values.update({'source_updated_on' : source_updated_on})
+
+    if not values:
+        return
         
     with engine.begin() as conn:
         st = update(log_table).where(log_table.c.run_id == run_id).values(**values)

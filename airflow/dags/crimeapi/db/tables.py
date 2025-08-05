@@ -14,6 +14,7 @@ def create_log_table(engine: Engine) -> Table:
         Column("start_time", TIME),
         Column("end_time", TIME),
         Column("status", String(10)),
+        Column("mode", String(10)),
         Column("config", Text),
     )
 
@@ -36,7 +37,7 @@ def create_date_table(engine: Engine) -> Table:
     )
 
     logger.info("Creating Table 'date'")
-    meta.create_all(bind=engine)
+    meta.create_all(bind=engine, checkfirst=True)
     return table
 
 def create_crime_table(engine: Engine) -> Table:
