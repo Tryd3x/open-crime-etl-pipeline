@@ -1,17 +1,17 @@
-from airflow import DAG
-from airflow.operators.empty import EmptyOperator
-from airflow.operators.python import PythonOperator, BranchPythonOperator
-from airflow.utils.state import State
-from airflow.utils.trigger_rule import TriggerRule
-
 from dotenv import load_dotenv
 load_dotenv()
 
+from airflow import DAG
+from airflow.utils.state import State
+from airflow.operators.empty import EmptyOperator
+from airflow.utils.trigger_rule import TriggerRule
+from airflow.operators.python import PythonOperator, BranchPythonOperator
+
 import os
-from datetime import datetime, timedelta, time
-from pathlib import Path
 import gzip
 import json
+from pathlib import Path
+from datetime import datetime, timedelta, time
 
 from crimeapi.extract import fetch_data_api
 from crimeapi.load import upload_files_to_s3, download_files_from_s3
@@ -19,7 +19,7 @@ from crimeapi.transform import transform
 from crimeapi.common.connect import create_postgres_conn, create_aws_conn
 from crimeapi.utils.helper import generate_date_range, save_to_path, str_to_date, clear_dir
 from crimeapi.db.helper import MetaData, initialize_run_log, update_run_log, load_to_postgres, get_last_source_update
-from crimeapi.db.tables import create_log_table, create_crime_table
+from crimeapi.db.tables import create_log_table, create_crime_table, create_date_table
 from crimeapi.utils.custom_exceptions import APIPageFetchError
 
 import logging
@@ -30,7 +30,33 @@ default_args = {
     "retry_delay" : timedelta(seconds=10),
 }
 
+def create_tables(engine, **context):
+    """ 
+    This task ensures all the necessary tables are in place before proceeding downstream. Avoids arbitrary checks and creation of table downstream
+    """
+
+    # Tables to check for:
+    # pipeline_logs, crime, date
+    meta = MetaData()
+    meta.reflect(engine)
+
+    if 'pipeline_logs' not in meta.tables.keys():
+        logger.info("Table 'pipeline_logs' does not exist'")
+        create_log_table(engine=engine)
+    
+    if 'crime' not in meta.tables.keys():
+        logger.info("Table 'crime' does not exist'")
+        create_crime_table(engine=engine)
+
+    if 'date' not in meta.tables.keys():
+        logger.info("Table 'date' does not exist'")
+        create_date_table(engine=engine)
+
 def fetch_metadata(engine, configs: dict, **context):
+    """ 
+    This task initializes the pipeline, its metadata and xcom variables
+    """
+
     ti = context['ti']
     bucket_name = configs.get("bucket_name")
     ingest_batchsize = configs.get('ingest_batchsize')
@@ -40,11 +66,6 @@ def fetch_metadata(engine, configs: dict, **context):
     meta = MetaData()
     meta.reflect(engine)
 
-    # Check if table exists, else create one
-    if 'pipeline_logs' not in meta.tables.keys():
-        logger.info("Table 'pipeline_logs' does not exist'")
-        create_log_table(engine) 
-    
     # Initialize Log
     run_id, last_source_update, last_load_date = initialize_run_log(engine=engine, config=configs)
 
@@ -58,21 +79,27 @@ def fetch_metadata(engine, configs: dict, **context):
     ti.xcom_push(key='last_load_date', value=last_load_date)
 
 def decide_load_type(engine, **context):
+    """
+    This task decides whether to perform full load or incremental load
+    """
+
     ti = context['ti']
 
     run_id = ti.xcom_pull(task_ids='fetch_metadata', key='pipeline_run_id')
     source_last_update = ti.xcom_pull(task_ids='fetch_metadata', key='source_last_updated_on')
 
-    mode = 'INCREMENT' if source_last_update else 'FULL'
-
     # Update Log
+    mode = 'INCREMENT' if source_last_update else 'FULL'
     update_run_log(engine=engine, run_id=run_id, mode=mode)
 
     return 'incremental_load' if source_last_update else 'full_load'
 
 def full_load(engine, save_path: str, **context):
     """
-    This function possibly handles the generation of dates utilized to query the API and calls fetch_data_api()
+    Performs full load from API to S3.
+
+    Handles:
+    - generation of dates to query the API
     - Avoids OOM by utilizing generator to fetch data from API
     - On failure, resume from last successful page
     - On Airflow retry, waits till retries are exhausted before pushing update to log table and clearing the xcom cache
@@ -86,9 +113,9 @@ def full_load(engine, save_path: str, **context):
     last_checkpoint = ti.xcom_pull(task_ids="full_load", key="last_checkpoint") or {}
     last_page = last_checkpoint.get('last_page', None)
 
+    # Generate dates to query
     start_date = str_to_date(last_checkpoint.get('last_date')) if last_checkpoint.get('last_date') else datetime(2025,1,1)
     end_date = datetime.now()
-
     date_ranges = generate_date_range(start_date=start_date, end_date=end_date)
 
     try:
@@ -122,6 +149,16 @@ def full_load(engine, save_path: str, **context):
         raise    
     
 def incremental_load(engine, save_path: str, **context):
+    """
+    Performs incremental load from API to S3.
+
+    Handles:
+    - generation of dates to query the API
+    - Avoids OOM by utilizing generator to fetch data from API
+    - On failure, resume from last successful page
+    - On Airflow retry, waits till retries are exhausted before pushing update to log table and clearing the xcom cache
+    """
+
     ti = context['ti']
     run_id = ti.xcom_pull(task_ids='fetch_metadata', key='pipeline_run_id')
     batchsize = ti.xcom_pull(task_ids='fetch_metadata', key='ingest_batchsize')
@@ -130,15 +167,13 @@ def incremental_load(engine, save_path: str, **context):
     last_checkpoint = ti.xcom_pull(task_ids="incremental_load", key="last_checkpoint") or {}
     last_page = last_checkpoint.get('last_page', None)
     last_date = last_checkpoint.get('last_date', None)
-
     last_source_update = ti.xcom_pull(task_ids='fetch_metadata', key='source_last_updated_on')
 
+    # Generate dates to query 
     start_date = last_date or datetime.combine(last_source_update, time.min)
     end_date = datetime.now()
-
     date_ranges = generate_date_range(start_date=start_date, end_date=end_date)
 
-    # Iterate over each date_range, call fetch_data_api()
     try:
         for dr in date_ranges:
             start = dr.get('start_date')
@@ -183,9 +218,12 @@ def upload_to_s3(engine, client, source_path, destination_path, **context):
     clear_dir(source_path)
 
 def load_s3_to_postgres(engine, client, source_path, destination_path, **context):
-    """TODO
+    """
+    This task loads data from s3 to database
+    
+    TODO
     - Need to add `try except` here to handle retries and log updates
-    - Need some kind of logic to prevent re-inserts to database possibly creating duplicates
+    - Need some kind of logic to prevent re-inserts to database possibly creating duplicates or let the transformation layer handle duplicates
     - Clear tmp directory once upload has completed or retries exhausted
     """
     
@@ -197,12 +235,7 @@ def load_s3_to_postgres(engine, client, source_path, destination_path, **context
     meta = MetaData()
     meta.reflect(engine)
 
-    crime_table = None
-    if 'crime' not in meta.tables.keys():
-        logger.info("Missing Table: 'crime'")
-        crime_table = create_crime_table(engine)
-    else: 
-        crime_table = meta.tables['crime']
+    crime_table = meta.tables['crime']
 
     # Bulk Download from s3
     download_files_from_s3(client=client, bucket_name=bucket_name, source_path=source_path, destination_path=destination_path, last_load_date=last_load_date)
@@ -231,7 +264,6 @@ def load_s3_to_snowflake(**context):
     pass
 
 def update_metdata(engine, **context):
-    
     ti = context['ti']
     run_id = ti.xcom_pull(task_ids='fetch_metadata', key="pipeline_run_id")
 
@@ -262,7 +294,6 @@ def update_metdata(engine, **context):
 # - delta
 # - batchsize
 # - bucketname
-
 
 db_params = {
     "host": 'host.docker.internal',
@@ -297,6 +328,15 @@ with DAG(
     default_args=default_args,
     catchup=False
 ) as dag:
+    
+    # Check tables
+    check_table = PythonOperator(
+        task_id = "check_table",
+        python_callable=create_tables,
+        op_args={
+            "engine" : engine
+        }
+    )
     
     # Fetch Metadata
     check_metadata = PythonOperator(
@@ -379,4 +419,4 @@ with DAG(
     # # Validate both DBs are synced
     # validate = EmptyOperator(task_id="validate_sync")
 
-    check_metadata >> decide_load_type >> [full_data_load, incremental_data_load]  >> upload_s3 >> load_postgres >> update_metadata
+    check_table >> check_metadata >> decide_load_type >> [full_data_load, incremental_data_load]  >> upload_s3 >> load_postgres >> update_metadata
