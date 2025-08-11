@@ -1,9 +1,8 @@
-variable "region" {
-    type = string
-    default = "us-east-2"
-}
+# Provide variables that you would like to override using either:
+# terraform apply -var="key=value"
+# terraform apply -var-file="filename.tfvars"
 
-variable "bucket_name" {
-    type = string
-    default = "open-crime-etl"
+variable "snowflake_password" {
+  type = string
+  sensitive = true
 }
