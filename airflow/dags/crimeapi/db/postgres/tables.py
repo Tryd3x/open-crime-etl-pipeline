@@ -8,7 +8,7 @@ def create_log_table(engine: Engine) -> Table:
     metadata = MetaData()
     table = Table(
         "pipeline_logs", metadata,
-        Column("run_id", Integer, primary_key=True, autoincrement=True),
+        Column("run_id", String(20), primary_key=True, autoincrement=True),
         Column("ingested_at", Date),
         Column("source_updated_on", Date),
         Column("start_time", TIME),

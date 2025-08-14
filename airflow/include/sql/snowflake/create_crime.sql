@@ -1,0 +1,22 @@
+CREATE TABLE crime (
+    crime_id VARCHAR(20) PRIMARY KEY,
+    case VARCHAR(20),
+    date_of_occurrence TIMESTAMP_TZ,
+    block VARCHAR(20),
+    iucr VARCHAR(20),
+    primary_description VARCHAR(20),
+    secondary_description VARCHAR(20),
+    location_description VARCHAR(20),
+    arrest VARCHAR(20),
+    domestic VARCHAR(20),
+    beat INTEGER,
+    district INTEGER,
+    ward INTEGER,
+    community_area INTEGER,
+    fbi_code VARCHAR(20),
+    x_coordinate INTEGER,
+    y_coordinate INTEGER,
+    latitude FLOAT,
+    longitude FLOAT,
+    source_updated_on TIMESTAMP_TZ
+)

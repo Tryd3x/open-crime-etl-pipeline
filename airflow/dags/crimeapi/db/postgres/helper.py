@@ -1,42 +1,12 @@
 import logging 
 from datetime import datetime, timezone, date
-from sqlalchemy import MetaData, insert, update, select, func
+from sqlalchemy import MetaData, insert, update, select, func, text
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.dialects.postgresql import insert as upsert
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-def initialize_run_log(engine: Engine, config: dict) -> int:
-    logger.info("Initializing pipeline status to 'pipeline_logs'")
-    meta = MetaData()
-    meta.reflect(engine)
-
-    log_table = meta.tables['pipeline_logs']
-
-    with engine.begin() as conn:
-        # Initiate log
-        st1 = insert(log_table).values(
-            ingested_at = datetime.now(timezone.utc).strftime('%Y-%m-%d'),
-            start_time = datetime.now(timezone.utc).strftime("%H:%M:%S"),
-            status = 'RUNNING',
-            config = str(config)
-        ).returning(log_table.c.run_id)
-
-        result = conn.execute(st1)
-        run_id = result.scalar()
-
-        # Fetch source_updated_on
-        st2 = select(func.max(log_table.c.source_updated_on))
-        result = conn.execute(st2)
-        last_source_update = result.scalar()
-
-        # Fetch last date of ingest
-        st3 = select(func.max(log_table.c.ingested_at)).where(log_table.c.status.in_(['SUCCESS', 'RUNNING']))
-        result = conn.execute(st3)
-        last_load_date = result.scalar()
-        return (run_id, last_source_update, last_load_date)
-    
 def update_run_log(engine: Engine, run_id: int, status : str = None, mode: str = None, source_updated_on: datetime = None) -> None:
 
     meta = MetaData()
@@ -66,7 +36,8 @@ def update_run_log(engine: Engine, run_id: int, status : str = None, mode: str =
         conn.execute(st)
 
 def load_to_postgres(engine: Engine, batchsize: int, table, df: pd.DataFrame):
-    """ Function to perform batch insert into DB"""
+    """ Function to perform batch insert into DB
+    """
     key_columns = [pk_column.name for pk_column in table.primary_key.columns.values()]
 
     for start in range(0, len(df), batchsize):
@@ -81,7 +52,6 @@ def load_to_postgres(engine: Engine, batchsize: int, table, df: pd.DataFrame):
 
             conn.execute(up_st)
 
-# This is incorrect, must fetch the source date from the data table and not the meta table
 def get_last_source_update(engine: Engine) -> date:
     meta = MetaData()
     meta.reflect(engine)

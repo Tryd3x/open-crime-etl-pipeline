@@ -27,7 +27,9 @@ def create_postgres_conn(
     return create_engine(url)
 
 def create_aws_conn(resource: str, access_key: str, secret_access_key: str, region: str):
-
+    """
+    Connect to aws client
+    """
     client = boto3.resource(
         resource,
         aws_access_key_id=access_key,
@@ -36,3 +38,19 @@ def create_aws_conn(resource: str, access_key: str, secret_access_key: str, regi
     )
 
     return client
+
+def create_snowflake_conn(account, user, password, database, schema, role, warehouse):
+    """
+    Connect to snowflake
+    """
+    url = URL(
+        account = account,
+        user= user,
+        password = password,
+        database = database,
+        schema = schema,
+        role = role,
+        warehouse = warehouse
+    )
+
+    return create_engine(url)
