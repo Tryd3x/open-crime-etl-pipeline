@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 class PostgresExecutor:
 
-    def __init__(self, host: str, port: str, username: str, password: str, db: str, template_path: str):
+    def __init__(self, host: str, port: str, username: str, password: str, db: str, template_path: str, schema: str = None):
         self.engine: Engine = create_engine(
             URL.create(
                 drivername='postgresql',
@@ -21,6 +21,8 @@ class PostgresExecutor:
                 database=db
             )
         )
+
+        self.schema = schema or 'public'
 
         #  Set the template path in the config
         self.template_path = template_path
@@ -81,12 +83,12 @@ class PostgresExecutor:
             last_load_date = conn.execute(query).scalar()
             return last_load_date  
     
-    def create_table(self, sql):
-        """
-        Create Table
-        """
+    def create_table(self, sql: str):
+        """Create Table"""
 
         query = self.__load_query(sql)
+        table_name = sql.split(".")[0].split("_")[-1]
+        logger.info(f"Creating Table '{table_name}'")
         with self.engine.begin() as conn:
             conn.execute(query)
     
@@ -98,7 +100,7 @@ class PostgresExecutor:
                 WHERE schemaname = 'public'
             """
             result = conn.execute(query).fetchall()
-            result = [r[0] for r in result]
+            result = [r[0].lower() for r in result]
             return result
             
         
@@ -107,7 +109,7 @@ class PostgresExecutor:
         with self.engine.begin() as conn:
             query = """SELECT MAX(source_updated_on) FROM crime"""
             result = conn.execute(query)
-            return result
+            return result.scalar()
     
     def init_log(self, run_id: str, config: dict):
         self.__set_run_log(run_id, config)
@@ -150,12 +152,19 @@ class PostgresExecutor:
         """ Performs batch insert to Table 'crime' """
 
         staging_table = "stg_crime"
+
+        # Create the staging table
+        with self.engine.begin() as conn:
+            query = self.__load_query("create_stg_crime.sql")
+            conn.execute(query)
+
+        # Batch Insert
         for start in range(0, len(df), batchsize):
             logger.info(f"Insert batch at idx: {start} - {start+batchsize}")
             batch = df.iloc[start : start + batchsize]
 
             # Creates a staging table
-            batch.to_sql(staging_table, con=self.engine, if_exists='replace', index=False)
+            batch.to_sql(staging_table, con=self.engine, schema= self.schema,if_exists='append', index=False)
 
             # Dynamically create the clause
             columns = batch.columns.to_list()
@@ -176,6 +185,10 @@ class PostgresExecutor:
                 """)
 
                 conn.execute(query)
+            
+            with self.engine.begin() as conn:
+                conn.execute("TRUNCATE TABLE stg_crime")
+
         
         # Clear staging table
         with self.engine.begin() as conn:

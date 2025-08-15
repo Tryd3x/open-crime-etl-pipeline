@@ -1,4 +1,5 @@
-CREATE TABLE IF NOT EXISTS crime (
+DROP TABLE IF EXISTS stg_crime;
+CREATE TABLE IF NOT EXISTS stg_crime (
     crime_id VARCHAR PRIMARY KEY,
     case_num VARCHAR,
     date_of_occurrence TIMESTAMPTZ,
@@ -19,4 +20,4 @@ CREATE TABLE IF NOT EXISTS crime (
     latitude DOUBLE PRECISION,
     longitude DOUBLE PRECISION,
     source_updated_on TIMESTAMPTZ
-)
+);

@@ -1,30 +1,4 @@
-from sqlalchemy.engine.base import Engine
-from sqlalchemy.engine.url import URL
-from sqlalchemy import create_engine
-import os
 import boto3
-
-def create_postgres_conn(
-        host: str,
-        port: str,
-        username: str,
-        password: str,
-        db: str,
-) -> Engine:
-    """
-    Connect to postgres Database
-    """
-
-    url = URL.create(
-        drivername='postgresql',
-        host=host,
-        port=port,
-        username=username,
-        password=password,
-        database=db
-    )
-
-    return create_engine(url)
 
 def create_aws_conn(resource: str, access_key: str, secret_access_key: str, region: str):
     """
@@ -38,19 +12,3 @@ def create_aws_conn(resource: str, access_key: str, secret_access_key: str, regi
     )
 
     return client
-
-def create_snowflake_conn(account, user, password, database, schema, role, warehouse):
-    """
-    Connect to snowflake
-    """
-    url = URL(
-        account = account,
-        user= user,
-        password = password,
-        database = database,
-        schema = schema,
-        role = role,
-        warehouse = warehouse
-    )
-
-    return create_engine(url)

@@ -2,6 +2,9 @@
 .env
 **/etl/config.yml
 
+# Ignore cleaning scripts
+**/clean_cache.sh
+
 # Ignore Virtual Environment
 **/.venv*/
 **/__pycache__/

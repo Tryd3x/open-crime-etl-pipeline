@@ -26,7 +26,7 @@ def transform(data):
         
         rename_col = {
             'id' : 'crime_id',
-            'case_number' : 'case',
+            'case_number' : 'case_num',
             'date' : 'date_of_occurrence',
             'primary_type' : 'primary_description',
             'description' : 'secondary_description',

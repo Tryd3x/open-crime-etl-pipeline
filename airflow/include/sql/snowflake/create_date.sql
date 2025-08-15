@@ -1,4 +1,4 @@
-CREATE TABLE date (
+CREATE TABLE IF NOT EXISTS date (
     date DATE PRIMARY KEY,
     day INTEGER,
     month INTEGER,

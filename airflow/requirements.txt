@@ -1,1 +1,11 @@
 # Astro Runtime includes the following pre-installed providers packages: https://www.astronomer.io/docs/astro/runtime-image-architecture#provider-packages
+
+pandas
+requests
+dotenv
+boto3
+pyarrow
+sqlalchemy 
+snowflake-sqlalchemy
+pyyaml
+psycopg2-binary

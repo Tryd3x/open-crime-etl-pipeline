@@ -1,5 +1,5 @@
-CREATE TABLE pipeline_logs (
-    run_id VARCHAR(10) PRIMARY KEY, 
+CREATE TABLE IF NOT EXISTS logs (
+    run_id TEXT PRIMARY KEY, 
     ingested_at DATE, 
     source_updated_on DATE, 
     start_time TIME, 
