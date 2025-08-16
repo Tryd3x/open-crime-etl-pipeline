@@ -10,3 +10,6 @@ provider "snowflake" {
 }
 
 # Might add docker as a provider
+provider "docker" {
+    host = "unix:///var/run/docker.sock"
+}

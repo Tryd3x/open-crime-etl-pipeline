@@ -7,6 +7,10 @@ resource "snowflake_warehouse" "crime_wh" {
   auto_suspend = local.auto_suspend
   auto_resume = local.auto_resume
   initially_suspended = local.initially_suspended
+ 
+  min_cluster_count = local.min_cluster
+  max_cluster_count = local.max_cluster
+  scaling_policy = local.scaling_policy
 }
 
 # Create database
