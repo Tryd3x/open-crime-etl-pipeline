@@ -4,7 +4,6 @@ load_dotenv()
 from airflow import DAG
 from airflow.models import XCom
 from airflow.utils.state import State
-from airflow.operators.empty import EmptyOperator
 from airflow.utils.trigger_rule import TriggerRule
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 
@@ -23,7 +22,6 @@ from crimeapi.utils.helper import generate_date_range, save_to_path, str_to_date
 
 from crimeapi.db.postgres.db_postgres import PostgresExecutor
 from crimeapi.db.snowflake.db_snowflake import SnowflakeExecutor
-
 from crimeapi.utils.custom_exceptions import APIPageFetchError
 
 import logging
@@ -47,18 +45,10 @@ def initialize_run(executors: dict, run_id: str, configs: dict, **context):
     # Initialize run in snowflake
     snow_last_source_update, snow_last_load = snow_executor.init_log(run_id, configs)
 
-    # Check if they are in sync
     """
     If the dates are out of sync, suggested solutions:
-
-    - Perform Sync before ingesting new data
-    - db lagging needs to catchup, so has to load from s3 (since it has current snapshot)
-    - Once Synced, proceed to ingest current snapshot
-    - Validate sync for both dbs in the end
-
-    For temporary solution:
-    - Get most recent dates for both source and load i.e max(load_date) and max(source_updated_on)
-    - Implement sync task later
+    - Perform Sync before ingesting new data? : Delayed data delivery to consumers which is bad.
+    - Perform Sync when validating at the end of the pipeline? : Once scheduled data is delivered, lagging db can start to catchup 
     """
 
     # Return synced last_source_update, last_load and run_id
@@ -95,9 +85,12 @@ def fetch_metadata(executors: dict, configs: dict, **context):
     """ 
     This task initializes the pipeline, its metadata and xcom variables
     """
-
     ti = context['ti']
     run_id = ti.run_id
+
+    pos_executor: PostgresExecutor = executors['postgres']
+    snow_executor: SnowflakeExecutor = executors['snowflake']
+
     bucket_name = configs.get("bucket_name")
     ingest_batchsize = configs.get('ingest_batchsize')
     load_batchsize = configs.get("load_batchsize")
@@ -109,27 +102,13 @@ def fetch_metadata(executors: dict, configs: dict, **context):
     ti.xcom_push(key='ingest_batchsize', value=ingest_batchsize)
     ti.xcom_push(key='load_batchsize', value=load_batchsize)
     ti.xcom_push(key='s3_bucket', value=bucket_name)
-    ti.xcom_push(key='source_last_updated_on', value=last_source_update)
     ti.xcom_push(key='last_load_date', value=last_load_date)
 
-def decide_load_type(executors: dict, **context):
-    """
-    This task decides whether to perform full load or incremental load
-    """
-
-    ti = context['ti']
-    run_id = ti.run_id
-    pos_executor: PostgresExecutor = executors['postgres']
-    snow_executor: SnowflakeExecutor = executors['snowflake']
-
-    source_last_update = ti.xcom_pull(task_ids='fetch_metadata', key='source_last_updated_on')
-
-    # Update Log
-    mode = 'INCREMENT' if source_last_update else 'FULL'
+    mode = 'INCREMENT' if last_source_update else 'FULL'
     pos_executor.update_log(run_id=run_id, mode=mode)
     snow_executor.update_log(run_id=run_id, mode=mode)
 
-    return 'incremental_load' if source_last_update else 'full_load'
+    return 'incremental_load' if last_source_update else 'full_load'
 
 def full_load(executors: dict, save_path: str, **context):
     """
@@ -301,9 +280,6 @@ def load_s3_to_postgres(executors: dict, client, source_path, destination_path, 
                 # Transform
                 df = transform(data)
                 
-                # On Failure:
-                # - Perform retry on that file itself
-
                 # Batch Insert
                 logger.info(f"Performing Batch insert: {file.as_posix()}")
                 pos_executor.load_crime_data(batchsize=batch_insert_size, df=df)
@@ -366,9 +342,6 @@ def load_s3_to_snowflake(executors: dict, client, source_path, destination_path,
                 # Transform
                 df = transform(data)
                 
-                # On Failure:
-                # - Perform retry on that file itself
-
                 # Batch Insert
                 logger.info(f"Performing Batch insert: {file.as_posix()}")
                 snow_executor.load_crime_data(batchsize=batch_insert_size, df=df)
@@ -398,6 +371,7 @@ def load_s3_to_snowflake(executors: dict, client, source_path, destination_path,
         
     if Path(destination_path).exists() and Path(destination_path).is_dir():
         Path(destination_path).exists()
+    
 
 def update_metdata(executors: dict, **context):
     ti = context['ti']
@@ -419,6 +393,10 @@ def update_metdata(executors: dict, **context):
 
     pos_executor.update_log(run_id=ti.run_id, status=status, source_updated_on=last_update)
     snow_executor.update_log(run_id=ti.run_id, status=status, source_updated_on=last_update)
+
+def validate_sync():
+    """ Check if dbs are in sync else trigger a run to sync up dbs"""
+    pass
 
 db_params = {
     "host": 'host.docker.internal',
@@ -486,15 +464,6 @@ with DAG(
         op_kwargs={
             "executors" : executors,
             "configs" : config
-        }
-    )
-
-    # Decide if it is a full load or incremental load
-    decide_load_type = BranchPythonOperator(
-        task_id = "decide_load_type",
-        python_callable=decide_load_type,
-        op_kwargs={
-            "executors" : executors
         }
     )
 
@@ -571,4 +540,4 @@ with DAG(
     # If they arent in sync, trigger a task to sync database from s3 and update metastore
     # validate = EmptyOperator(task_id="validate_sync")
 
-    check_table >> check_metadata >> decide_load_type >> [full_data_load, incremental_data_load]  >> upload_s3 >> [load_postgres, load_snowflake] >> update_metadata
+    check_table >> check_metadata  >> [full_data_load, incremental_data_load]  >> upload_s3 >> [load_postgres, load_snowflake] >> update_metadata
