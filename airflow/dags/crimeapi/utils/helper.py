@@ -1,9 +1,10 @@
+import re
 import json
 import gzip
 import shutil
 import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,24 @@ def str_to_date(str_date: str, format: str = '%Y-%m-%dT%H:%M:%S.%f') -> datetime
 def date_to_str(date: datetime, format: str = '%Y-%m-%dT%H:%M:%S.%f') -> str:
     return date.strftime(format)[:-3]
 
+def create_filter(param):
+    if isinstance(param, list):
+        # Sync Ingestion, generate date range
+        load_dates = "|".join(map(re.escape, param))
+
+    elif isinstance(param, date):
+        # Normal Ingestion, generate date range
+        today_date = datetime.now().date()
+        dates_to_process = [(param + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((today_date - param).days+1)]
+        
+        load_dates = "|".join(map(re.escape, dates_to_process))
+    else:
+        raise ValueError(f"Unsupported filter param type: {type(param)}")
+
+    # Generate the regex
+    regex = re.compile(rf"^raw/year=\d{{4}}/month=\d{{2}}/load_date=({load_dates})/.*")
+    return regex
+    
 def generate_date_range(start_date: datetime = None, end_date: datetime = None, delta: relativedelta = None) -> list:
     date_range = []
 

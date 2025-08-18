@@ -163,6 +163,13 @@ class SnowflakeExecutor:
             query = """SELECT MAX(source_updated_on) FROM crime"""
             result = conn.execute(query)
             return result.scalar()
+        
+    def get_load_date_from_logs(self):
+        """Fetch load date from Table 'logs'"""
+        with self.engine.begin() as conn:
+            query = "SELECT ingested_at FROM logs WHERE status = 'SUCCESS'"
+            results = conn.execute(query).fetchall()
+            return results
     
     def load_crime_data(self, batchsize: int, df: pd.DataFrame):
         """ Performs batch insert to Table 'crime' """

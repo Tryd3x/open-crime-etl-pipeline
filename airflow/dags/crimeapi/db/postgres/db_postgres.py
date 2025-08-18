@@ -102,7 +102,6 @@ class PostgresExecutor:
             result = conn.execute(query).fetchall()
             result = [r[0].lower() for r in result]
             return result
-            
         
     def get_last_source_update(self):
         """ Fetch last 'source_updated_on' from Table 'crime' """
@@ -110,6 +109,14 @@ class PostgresExecutor:
             query = """SELECT MAX(source_updated_on) FROM crime"""
             result = conn.execute(query)
             return result.scalar()
+        
+    def get_load_date_from_logs(self):
+        """Fetch load date from Table 'logs'"""
+        with self.engine.begin() as conn:
+            query = "SELECT ingested_at FROM logs WHERE status = 'SUCCESS'"
+            results = conn.execute(query).fetchall()
+            return results
+
     
     def init_log(self, run_id: str, config: dict):
         self.__set_run_log(run_id, config)
@@ -138,7 +145,7 @@ class PostgresExecutor:
         
         set_values = ", ".join(f"{k} = :{k}" for k in values.keys() if k != 'run_id')
 
-        with self.engine.connect() as conn:
+        with self.engine.begin() as conn:
             query = text(f"""
                 UPDATE logs
                 SET
