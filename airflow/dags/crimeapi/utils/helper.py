@@ -16,16 +16,18 @@ def date_to_str(date: datetime, format: str = '%Y-%m-%dT%H:%M:%S.%f') -> str:
     return date.strftime(format)[:-3]
 
 def create_filter(param):
-    if isinstance(param, list):
-        # Sync Ingestion, generate date range
-        load_dates = "|".join(map(re.escape, param))
-
-    elif isinstance(param, date):
+    # This code is prone to break if it depends on the param type, bad practise >:(
+    if isinstance(param, date):
         # Normal Ingestion, generate date range
         today_date = datetime.now().date()
         dates_to_process = [(param + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((today_date - param).days+1)]
         
         load_dates = "|".join(map(re.escape, dates_to_process))
+
+    elif isinstance(param, str):
+        # Sync Ingestion
+        load_dates = "|".join(map(re.escape, [param]))
+
     else:
         raise ValueError(f"Unsupported filter param type: {type(param)}")
 

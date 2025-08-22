@@ -18,5 +18,5 @@ CREATE TABLE IF NOT EXISTS crime (
     y_coordinate INTEGER,
     latitude FLOAT,
     longitude FLOAT,
-    source_updated_on TIMESTAMP_TZ
+    source_updated_on DATE
 )

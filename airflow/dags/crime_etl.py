@@ -8,14 +8,12 @@ from airflow.utils.trigger_rule import TriggerRule
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 
 import os
-import gzip
-import json
 import shutil
 from pathlib import Path
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, timezone
 
 from crimeapi.extract import fetch_data_api
-from crimeapi.load import upload_files_to_s3, download_files_from_s3
+from crimeapi.load import upload_files_to_s3, download_files_from_s3, load_crime
 from crimeapi.transform import transform
 
 from crimeapi.common.connect import create_aws_conn
@@ -194,11 +192,11 @@ def incremental_load(executors: dict, save_path: str, **context):
 
     # Check if there are any persistent state in xcom we can resume from
     last_checkpoint = ti.xcom_pull(task_ids=ti.task_id, key="last_checkpoint") or {}
-    last_page = last_checkpoint.get('last_page', None)
-    last_date = last_checkpoint.get('last_date', None)
+    resume_page = last_checkpoint.get('last_page', None)
+    resume_date = last_checkpoint.get('last_date', None)
 
     # Generate dates to query 
-    start_date = last_date or datetime.combine(last_source_update, time.min)
+    start_date = resume_date or datetime.combine(last_source_update, time.min)
     end_date = datetime.now()
     date_ranges = generate_date_range(start_date=start_date, end_date=end_date)
 
@@ -207,7 +205,7 @@ def incremental_load(executors: dict, save_path: str, **context):
             start = dr.get('start_date')
             end = dr.get('end_date')
 
-            for pagenum, data in fetch_data_api(start_date=start, end_date=end, pagesize=batchsize, resume_page=last_page):
+            for pagenum, data in fetch_data_api(start_date=start, end_date=end, pagesize=batchsize, resume_page=resume_page):
 
                 # Save to path
                 save_to_path(save_to=save_path, date=start, pagenum=pagenum, data=data)
@@ -246,7 +244,7 @@ def upload_to_s3(executors: dict, client, source_path, destination_path, **conte
     # Clear tmp directory - DONT CLEAR
     clear_dir(source_path) 
 
-def load_s3_to_postgres(executors: dict, client, source_path, destination_path, load_date = None, **context):
+def load_s3_to_postgres(executors: dict, client, source_path, destination_path, **context):
     """
     This task loads data from s3 to postgres
     
@@ -263,36 +261,20 @@ def load_s3_to_postgres(executors: dict, client, source_path, destination_path, 
 
     # Checkpoint
     last_checkpoint = ti.xcom_pull(ti.task_id, key='last_checkpoint') or {}
-    last_load_date = load_date or ti.xcom_pull(task_ids="fetch_metadata", key="last_load_date")
 
     # Filter
-    missing_dates = ti.xcom_pull(task_ids="validate_sync", key="missing_dates") 
-    missing_dates = missing_dates and missing_dates.get('postgres')
-
-    filter_condition = missing_dates  or last_load_date
-    filter = create_filter(filter_condition)
+    last_load_date = ti.xcom_pull(task_ids="fetch_metadata", key="last_load_date")
+    filter = create_filter(last_load_date)
 
     # Bulk Download from s3
     if not last_checkpoint.get("download_successful"):
         download_files_from_s3(client=client, bucket_name=bucket_name, source_path=source_path, destination_path=destination_path, filter=filter)
 
-    # Stream - Uncompress -> Load -> Transform -> Batch Insert
+    # Uncompress -> Load -> Transform -> Batch Insert
     logger.info("Starting Uncompress")
     for file in Path(destination_path).rglob("*.gz"):
-        # Unzip
         try:
-            with gzip.open(file.as_posix(), 'rt') as f:
-
-                # Load
-                logger.info(f"Loading JSON: {file.as_posix()} ")
-                data = json.load(f)
-                
-                # Transform
-                df = transform(data)
-                
-                # Batch Insert
-                logger.info(f"Performing Batch insert: {file.as_posix()}")
-                pos_executor.load_crime_data(batchsize=batch_insert_size, df=df)
+            load_crime(pos_executor, batch_insert_size, file)
 
         except Exception as e:
             logger.exception(e)
@@ -331,13 +313,10 @@ def load_s3_to_snowflake(executors: dict, client, source_path, destination_path,
 
     # Checkpoint
     last_checkpoint = ti.xcom_pull(ti.task_id, key='last_checkpoint') or {}
-    last_load_date = ti.xcom_pull(task_ids="fetch_metadata", key="last_load_date") 
 
     # Filter
-    missing_dates = ti.xcom_pull(task_ids="validate_sync", key="missing_dates")
-    missing_dates = missing_dates and missing_dates.get('snowflake')
-    filter_condition = missing_dates or last_load_date
-    filter = create_filter(filter_condition)
+    last_load_date = ti.xcom_pull(task_ids="fetch_metadata", key="last_load_date") 
+    filter = create_filter(last_load_date)
 
     # Bulk Download from s3
     if not last_checkpoint.get("download_successful"):
@@ -348,17 +327,7 @@ def load_s3_to_snowflake(executors: dict, client, source_path, destination_path,
     for file in Path(destination_path).rglob("*.gz"):
         # Unzip
         try:
-            with gzip.open(file.as_posix(), 'rt') as f:
-                # Load
-                logger.info(f"Loading JSON: {file.as_posix()} ")
-                data = json.load(f)
-                
-                # Transform
-                df = transform(data)
-                
-                # Batch Insert
-                logger.info(f"Performing Batch insert: {file.as_posix()}")
-                snow_executor.load_crime_data(batchsize=batch_insert_size, df=df)
+            load_crime(snow_executor, batch_insert_size, file)
 
         except Exception as e:
             logger.exception(e)
@@ -393,8 +362,6 @@ def update_metdata(executors: dict, **context):
     pos_executor: PostgresExecutor = executors['postgres']
     snow_executor: SnowflakeExecutor = executors['snowflake']
 
-    last_update = pos_executor.get_last_source_update()
-
     dag_run = ti.get_dagrun()
     all_upstream_task_ids = ti.task.get_flat_relatives(upstream=True)
     failed_task = False
@@ -406,8 +373,8 @@ def update_metdata(executors: dict, **context):
 
     status = 'FAILED' if failed_task else 'SUCCESS'
 
-    pos_executor.update_log(run_id=ti.run_id, status=status, source_updated_on=last_update)
-    snow_executor.update_log(run_id=ti.run_id, status=status, source_updated_on=last_update)
+    pos_executor.update_log(run_id=ti.run_id, status=status)
+    snow_executor.update_log(run_id=ti.run_id, status=status)
 
 def validate_sync(executors: dict, **context):
     """ Check if dbs are in sync else trigger a run to sync up dbs"""
@@ -423,8 +390,13 @@ def validate_sync(executors: dict, **context):
     pos_load_date = set(pos_executor.get_load_date_from_logs())
     snow_load_date = set(snow_executor.get_load_date_from_logs())
 
-    pos_missed_dates = snow_load_date - pos_load_date
-    snow_missed_dates = pos_load_date - snow_load_date
+    # Error in xcom since it is not able to serialize below objects, need to find a way
+    pos_missed_dates = list(snow_load_date - pos_load_date)
+    snow_missed_dates = list(pos_load_date - snow_load_date)
+
+    # Normalize dates into string to be serializable
+    pos_missed_dates = [d[0].strftime("%Y-%m-%d") for d in pos_missed_dates]
+    snow_missed_dates = [d[0].strftime("%Y-%m-%d") for d in snow_missed_dates]
 
     tasks = []
 
@@ -438,12 +410,110 @@ def validate_sync(executors: dict, **context):
 
     return tasks
 
+def sync_postgres_db(executors, client, source_path, destination_path, configs, **context):
+
+    ti = context['ti']
+    run_id = ti.run_id
+    pos_executor: PostgresExecutor = executors['postgres']
+    bucket_name = ti.xcom_pull(task_ids='fetch_metadata', key='s3_bucket')
+    batch_insert_size = ti.xcom_pull(task_ids='fetch_metadata', key='load_batchsize')
+
+    # Checkpoint
+    last_checkpoint = ti.xcom_pull(ti.task_id, key='last_checkpoint') or {}
+
+    # Filter
+    missing_dates = ti.xcom_pull(task_ids="validate_sync", key="missing_dates") 
+    missing_dates = missing_dates and missing_dates.get('postgres')
+    logger.info(f"Missed Dates: {missing_dates}")
+    try:
+        for missed_date in missing_dates:
+            # Log the missing_date as load_date, we are inserting not updating
+            current_time = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            pos_executor.insert('logs', run_id=run_id, load_date=missed_date, type='RECOVERY', mode='INCREMENT', status='RUNNING', config=str(configs), start_time=current_time)
+
+            # Create filter
+            filter = create_filter(missed_date)
+
+            # Download the missing files
+            download_files_from_s3(client=client, bucket_name=bucket_name, source_path=source_path, destination_path=destination_path, filter=filter)
+
+            # Iterate over downloaded files and load
+            for file in Path(destination_path).rglob("*.gz"):
+                load_crime(pos_executor, batch_insert_size, file)
+
+            # Update status, end_time
+            current_time = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            missed_date = datetime.strptime(missed_date, '%Y-%m-%d')
+            pos_executor.update('logs', where=['run_id', 'load_date'], run_id=run_id, load_date = missed_date, status='SUCCESS', end_time=current_time)
+
+    except Exception as e:
+        # Log that was inserted might raise conflict if retried due to primary key violations when performing insert
+        raise
+
+    finally:
+        # Temporary until retry is handled
+        if Path(destination_path).exists() and Path(destination_path).is_dir():
+            shutil.rmtree(destination_path)
+
+def sync_snowflake_db(executors, client, source_path, destination_path, configs, **context):
+
+    ti = context['ti']
+    run_id = ti.run_id
+    pos_executor: PostgresExecutor = executors['snowflake']
+    bucket_name = ti.xcom_pull(task_ids='fetch_metadata', key='s3_bucket')
+    batch_insert_size = ti.xcom_pull(task_ids='fetch_metadata', key='load_batchsize')
+
+    # Checkpoint
+    last_checkpoint = ti.xcom_pull(ti.task_id, key='last_checkpoint') or {}
+
+    # Filter
+    missing_dates = ti.xcom_pull(task_ids="validate_sync", key="missing_dates") 
+    missing_dates = missing_dates and missing_dates.get('snowflake')
+    logger.info(f"Missed Dates: {missing_dates}")
+    try:
+        for missed_date in missing_dates:
+            # Log the missing_date as load_date, we are inserting not updating
+            current_time = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            pos_executor.insert('logs', run_id=run_id, load_date=missed_date, type='RECOVERY', mode='INCREMENT', status='RUNNING', config=str(configs), start_time=current_time)
+
+            # Create filter
+            filter = create_filter(missed_date)
+
+            # Download the missing files
+            download_files_from_s3(client=client, bucket_name=bucket_name, source_path=source_path, destination_path=destination_path, filter=filter)
+
+            # Iterate over downloaded files and load
+            for file in Path(destination_path).rglob("*.gz"):
+                load_crime(pos_executor, batch_insert_size, file)
+
+            # Update status, end_time
+            current_time = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            missed_date = datetime.strptime(missed_date, '%Y-%m-%d')
+            pos_executor.update('logs', where=['run_id', 'load_date'], run_id=run_id, load_date = missed_date, status='SUCCESS', end_time=current_time)
+
+    except Exception as e:
+        # Log that was inserted might raise conflict if retried due to primary key violations when performing insert
+        raise
+
+    finally:
+        # Temporary until retry is handled
+        if Path(destination_path).exists() and Path(destination_path).is_dir():
+            shutil.rmtree(destination_path)
+
 db_params = {
     "host": 'host.docker.internal',
     "port": '5433',
     "username": 'admin',
     "password": 'admin',
     "db": 'crime_db',
+}
+
+sn_params = {
+    "host": 'host.docker.internal',
+    "port": '5433',
+    "username": 'admin',
+    "password": 'admin',
+    "db": 'snowflake_db',
 }
 
 snow_params = {
@@ -469,12 +539,16 @@ postgres_template_path = "./include/sql/postgres"
 snowflake_template_path = "./include/sql/snowflake"
 
 postgres_db = PostgresExecutor(**db_params, template_path=postgres_template_path)
-snowflake_db = SnowflakeExecutor(**snow_params, template_path=snowflake_template_path)
+snowflake_db = PostgresExecutor(**sn_params, template_path=postgres_template_path)
+
+# Temporarily down for maintenance 
+# snowflake_db = SnowflakeExecutor(**snow_params, template_path=snowflake_template_path)
+
 client = create_aws_conn(resource='s3', **aws_params)
 
 executors = dict(postgres=postgres_db, snowflake=snowflake_db)
 config = {
-    "bucket_name" : "crime-etl",
+    "bucket_name" : "crime-etl-bucket",
     "ingest_batchsize" : 5000,
     "load_batchsize": 1000,
 }
@@ -583,24 +657,29 @@ with DAG(
 
     sync_postgres = PythonOperator(
         task_id = "sync_postgres",
-        python_callable=load_s3_to_postgres,
+        python_callable=sync_postgres_db,
         op_kwargs={
             "executors" : executors,
             "client" : client,
             "source_path" : s3_destination, 
             "destination_path" : f"{tmp}/postgres",
+            "configs" : config
         }
     )
 
     sync_snowflake = PythonOperator(
         task_id = "sync_snowflake",
-        python_callable=load_s3_to_snowflake,
+        python_callable=sync_snowflake_db,
         op_kwargs={
             "executors" : executors,
             "client" : client,
             "source_path" : s3_destination, 
             "destination_path" : f"{tmp}/snowflake",
+            "configs" : config
         }
     )
+
+    # After sync, need to update the metadata table but what about the run_id, use the same one?
+    # So we fixed loading the missing data from either of the dbs, but need some sort of tracker to know that the date we ingested is successful so we can probably modify the ingested_at in the metastore but what about the run_id, how do we get that? the missing load_date was performed in the current run so, missing load_date X was performed on run_id A on load_date Y
 
     check_table >> check_metadata  >> [full_data_load, incremental_data_load]  >> upload_s3 >> [load_postgres, load_snowflake] >> update_metadata >> validate >> [sync_postgres, sync_snowflake]

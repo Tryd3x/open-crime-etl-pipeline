@@ -37,26 +37,26 @@ class PostgresExecutor:
     
     def __set_run_log(self, run_id: str, config: dict) -> None:
         """ Initialize run in logs"""
+
+        # Need to take in new params:
+        # processed_at -> Tracks the date the load was performed on
+        # load_date -> The date the load was scheduled for
         
         values = {
             'run_id' : run_id,
-            'ingested_at' : datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+            'type' : 'SCHEDULED',
+            'load_date' : datetime.now(timezone.utc).strftime('%Y-%m-%d'),
             'start_time' : datetime.now(timezone.utc).strftime("%H:%M:%S"),
             'status' : 'RUNNING',
             'config' : str(config)
         }
 
+        set_clause = ",".join(values.keys())
         val_clause = ",".join([f':{k}' for k in values.keys()])
 
         with self.engine.begin() as conn:
             query = text(f"""
-                INSERT INTO logs(
-                    run_id,
-                    ingested_at,
-                    start_time,
-                    status,
-                    config
-                )
+                INSERT INTO logs({set_clause})
                 VALUES ({val_clause})
             """)
 
@@ -66,7 +66,7 @@ class PostgresExecutor:
         """ Fetch latest date the source was updated"""
 
         with self.engine.begin() as conn:
-            query = """SELECT MAX(source_updated_on) FROM logs"""
+            query = """SELECT MAX(source_updated_on) FROM crime"""
             last_source_update = conn.execute(query).scalar()
             return last_source_update  
         
@@ -75,7 +75,7 @@ class PostgresExecutor:
 
         with self.engine.begin() as conn:
             query = """
-                SELECT MAX(ingested_at) 
+                SELECT MAX(load_date) 
                 FROM logs
                 WHERE status in ('SUCCESS', 'RUNNING');
             """
@@ -102,30 +102,111 @@ class PostgresExecutor:
             result = conn.execute(query).fetchall()
             result = [r[0].lower() for r in result]
             return result
-        
-    def get_last_source_update(self):
-        """ Fetch last 'source_updated_on' from Table 'crime' """
+
+    def insert(self, table, **params):
+        """ Generic Table insert """
+        values = {k : v for k,v in params.items()}
+
+        set_clause = ", ".join(params.keys())
+        val_clause = ", ".join([f':{k}' for k in values.keys()])
+
         with self.engine.begin() as conn:
-            query = """SELECT MAX(source_updated_on) FROM crime"""
-            result = conn.execute(query)
-            return result.scalar()
+            query = text(f"""
+                INSERT INTO {table}({set_clause})
+                VALUES ({val_clause})
+            """)
+
+            conn.execute(query, values)
+    
+    def update(self, table, where: list[str], **params):
+        """ Generic Table update"""
+        values = {k : v for k,v in params.items()}
+
+        set_values = ", ".join([f"{k} = :{k}" for k in values.keys() if k not in where])
+
+        # Check if primary keys are passed
+        missing_keys = [k for k in where if k not in values]
+        if missing_keys:
+            raise ValueError(f"Missing primary key(s) in update: {missing_keys}")
+
+        where_clause = ' AND '.join([f"{k} = :{k}" for k in values.keys() if k in where])
+
+        # whatever is in WHERE that shouldnt be in SET
+        with self.engine.begin() as conn:
+            query = text(f"""
+                UPDATE {table}
+                SET {set_values}
+                WHERE {where_clause}
+            """)
+
+            conn.execute(query, values)
         
     def get_load_date_from_logs(self):
         """Fetch load date from Table 'logs'"""
         with self.engine.begin() as conn:
-            query = "SELECT ingested_at FROM logs WHERE status = 'SUCCESS'"
+            query = "SELECT load_date FROM logs WHERE status = 'SUCCESS'"
             results = conn.execute(query).fetchall()
             return results
 
-    
     def init_log(self, run_id: str, config: dict):
         self.__set_run_log(run_id, config)
         last_source_update = self.__get_last_source_updated_on()
         last_load_date = self.__get_last_ingest_date_from_log()
 
-        return (last_source_update, last_load_date)
+        return (last_source_update, last_load_date)        
     
-    def update_log(self, run_id:str, status : str = None, mode: str = None, source_updated_on: datetime = None ):
+    # def insert_log(self, run_id, load_date = None, **params):
+    #     # What params are mandatory
+    #     # run_id, load_date
+
+    #     values = {
+    #         'run_id' : run_id,
+    #         'load_date' : datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+    #         'start_time' : datetime.now(timezone.utc).strftime("%H:%M:%S"),
+    #         'status' : 'RUNNING',
+    #     }
+
+    #     # Filter by params
+    #     if load_date:
+    #         # Update if performing a recovery
+    #         values.update({'load_date': load_date})
+
+    #     if params.get('type'):
+    #         # SCHEDULED or RECOVERY
+    #         values.update({'type': params.get('type')})
+
+    #     if params.get('mode'):
+    #         # INCREMENTAL OR FULL
+    #         values.update({'mode': params.get('mode')})
+
+    #     if params.get('end_time'):
+    #         values.update({'end_time': params.get('end_time')})
+
+    #     if params.get('source_updated_on'):
+    #         # Most recent date from crime data
+    #         values.update({'source_updated_on': params.get('source_updated_on')})
+
+    #     if params.get('status'):
+    #         # SUCCESS, RUNNING, FAILURE
+    #         values.update({'status': params.get('status')})
+
+    #     if params.get('config'):
+    #         # Additional
+    #         values.update({'config': params.get('config')})
+
+    #     set_clause = ", ".join(values.keys())
+    #     val_clause = ", ".join([f':{k}' for k in values.keys()])
+
+    #     with self.engine.begin() as conn:
+    #         query = text(f"""
+    #             INSERT INTO logs({set_clause})
+    #             VALUES ({val_clause})
+    #         """)
+
+    #         conn.execute(query)
+    
+    # This is not flexible and only updates on run_id, what if there were more than one primary key or where clause
+    def update_log(self, run_id: str, load_date: str = None, type: str = None, status : str = None, mode: str = None, source_updated_on: datetime = None):
         values = {
             'run_id' : run_id
         }
@@ -139,11 +220,18 @@ class PostgresExecutor:
 
         if mode:
             values.update({'mode' : mode})
+        
+        if type:
+            values.update({'type' : type})
+
+        if load_date:
+            # Convert date to datetime then update values
+            values.update({'load_date' : datetime.strptime(load_date, "%Y-%m-%d")})
 
         if source_updated_on:
             values.update({'source_updated_on' : source_updated_on})
         
-        set_values = ", ".join(f"{k} = :{k}" for k in values.keys() if k != 'run_id')
+        set_values = ", ".join([f"{k} = :{k}" for k in values.keys() if k != 'run_id'])
 
         with self.engine.begin() as conn:
             query = text(f"""

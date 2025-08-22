@@ -1,6 +1,9 @@
+import gzip
+import json
 import logging
 from pathlib import Path
 from datetime import datetime, timezone
+from crimeapi.transform import transform
 
 logger = logging.getLogger(__name__)
 
@@ -43,4 +46,15 @@ def download_files_from_s3(client, bucket_name: str, source_path: str, destinati
             logger.info(f"Downloaded file: {filename}")
             bucket.download_file(i.key, (destination_path / filename))
 
-
+def load_crime(pos_executor, batch_insert_size, file):
+    with gzip.open(file.as_posix(), 'rt') as f:
+        # Load
+        logger.info(f"Loading JSON: {file.as_posix()} ")
+        data = json.load(f)
+                
+        # Transform
+        df = transform(data)
+                
+        # Batch Insert
+        logger.info(f"Performing Batch insert: {file.as_posix()}")
+        pos_executor.load_crime_data(batchsize=batch_insert_size, df=df)

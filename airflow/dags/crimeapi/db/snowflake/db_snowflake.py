@@ -54,7 +54,7 @@ class SnowflakeExecutor:
         
         values = {
             'run_id' : run_id,
-            'ingested_at' : datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+            'load_date' : datetime.now(timezone.utc).strftime('%Y-%m-%d'),
             'start_time' : datetime.now(timezone.utc).strftime("%H:%M:%S"),
             'status' : 'RUNNING',
             'config' : str(config)
@@ -66,7 +66,7 @@ class SnowflakeExecutor:
             query = text(f"""
                 INSERT INTO logs(
                     run_id,
-                    ingested_at,
+                    load_date,
                     start_time,
                     status,
                     config
@@ -89,7 +89,7 @@ class SnowflakeExecutor:
 
         with self.engine.begin() as conn:
             query = """
-                SELECT MAX(ingested_at) 
+                SELECT MAX(load_date) 
                 FROM logs
                 WHERE status in ('SUCCESS', 'RUNNING');
             """
@@ -167,7 +167,7 @@ class SnowflakeExecutor:
     def get_load_date_from_logs(self):
         """Fetch load date from Table 'logs'"""
         with self.engine.begin() as conn:
-            query = "SELECT ingested_at FROM logs WHERE status = 'SUCCESS'"
+            query = "SELECT load_date FROM logs WHERE status = 'SUCCESS'"
             results = conn.execute(query).fetchall()
             return results
     
