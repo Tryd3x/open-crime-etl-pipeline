@@ -1,7 +1,6 @@
 locals {
     # S3
     region = "us-east-2"
-    bucket_name = "crime-etl"
 
     # Snowflake
     warehouse_name = "crime_wh"

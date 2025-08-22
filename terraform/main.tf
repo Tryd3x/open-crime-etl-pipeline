@@ -1,7 +1,7 @@
 module "crime_s3" {
   source = "./modules/s3"
   
-  bucket_name = local.bucket_name
+  bucket_name = var.s3_bucket_name
 }
 
 module "crime_snowflake" {

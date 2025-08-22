@@ -6,3 +6,7 @@ variable "snowflake_password" {
   type = string
   sensitive = true
 }
+
+variable "s3_bucket_name" {
+  type = string
+}
