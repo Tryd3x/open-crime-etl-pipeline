@@ -17,7 +17,7 @@ from crimeapi.load import upload_files_to_s3, download_files_from_s3, load_crime
 from crimeapi.transform import transform
 
 from crimeapi.common.connect import create_aws_conn
-from crimeapi.utils.helper import generate_date_range, save_to_path, str_to_date, clear_dir, create_filter
+from crimeapi.utils.helper import generate_date_range, save_to_path, str_to_date, clear_dir, create_filter, current_time
 
 from crimeapi.db.postgres.db_postgres import PostgresExecutor
 from crimeapi.db.snowflake.db_snowflake import SnowflakeExecutor
@@ -26,14 +26,9 @@ from crimeapi.utils.custom_exceptions import APIPageFetchError
 import logging
 logger = logging.getLogger(__name__)
 
-default_args = {
-    "retries" : 3,
-    "retry_delay" : timedelta(seconds=10),
-}
-
 def initialize_run(executors: dict, run_id: str, configs: dict, **context):
     """ TODO
-    - Need to modify the code/query that initializes the logs in the metastore and have it not retrieve run_id
+    - Trigger an external dag to run in parallel to sync the dbs up?
     """
     pos_executor: PostgresExecutor = executors['postgres']
     snow_executor: SnowflakeExecutor = executors['snowflake']
@@ -48,6 +43,8 @@ def initialize_run(executors: dict, run_id: str, configs: dict, **context):
     If the dates are out of sync, suggested solutions:
     - Perform Sync before ingesting new data? : Delayed data delivery to consumers which is bad.
     - Perform Sync when validating at the end of the pipeline? : Once scheduled data is delivered, lagging db can start to catchup 
+
+    - Solution adopted: Out of sync is handled at the end of the run, so what now, what if we see the dates are out of sync, what do we do?
     """
 
     # Return synced last_source_update, last_load and run_id
@@ -105,11 +102,9 @@ def fetch_metadata(executors: dict, configs: dict, **context):
     ti.xcom_push(key='source_last_updated_on', value=last_source_update)
 
     mode = 'INCREMENT' if last_source_update else 'FULL'
-    pos_executor.update_log(run_id=run_id, mode=mode)
-    snow_executor.update_log(run_id=run_id, mode=mode)
 
-    logger.debug(f"source_last_updated_on: {last_source_update}")
-
+    pos_executor.update('logs', where=['run_id'], run_id=run_id, mode=mode)
+    snow_executor.update('logs', where=['run_id'], run_id=run_id, mode=mode)
     return 'incremental_load' if last_source_update else 'full_load'
 
 def full_load(executors: dict, save_path: str, **context):
@@ -137,7 +132,7 @@ def full_load(executors: dict, save_path: str, **context):
     last_checkpoint = ti.xcom_pull(task_ids=ti.task_id, key="last_checkpoint") or {}
     last_page = last_checkpoint.get('last_page', None)
 
-    # Generate dates to query
+    # Generate dates to query, replace the else with dag's start date to backfill
     start_date = str_to_date(last_checkpoint.get('last_date')) if last_checkpoint.get('last_date') else datetime(2025,1,1)
     end_date = datetime.now()
     date_ranges = generate_date_range(start_date=start_date, end_date=end_date)
@@ -169,8 +164,8 @@ def full_load(executors: dict, save_path: str, **context):
             XCom.clear(dag_id=ti.dag_id, run_id=ti.run_id, task_id="full_load")
 
             # Update log
-            pos_executor.update_log(run_id=run_id, status="FAILED")
-            snow_executor.update_log(run_id=run_id, status="FAILED")
+            pos_executor.update('logs', where=['run_id'], run_id=run_id, status="FAILED", end_time = current_time())
+            snow_executor.update('logs', where=['run_id'], run_id=run_id, status="FAILED", end_time = current_time())
         raise    
     
 def incremental_load(executors: dict, save_path: str, **context):
@@ -185,6 +180,7 @@ def incremental_load(executors: dict, save_path: str, **context):
     """
 
     ti = context['ti']
+    run_id = ti.run_id
     pos_executor: PostgresExecutor = executors['postgres']
     snow_executor: SnowflakeExecutor = executors['snowflake']
     batchsize = ti.xcom_pull(task_ids='fetch_metadata', key='ingest_batchsize')
@@ -227,13 +223,14 @@ def incremental_load(executors: dict, save_path: str, **context):
             XCom.clear(dag_id=ti.dag_id, run_id=ti.run_id, task_id=ti.task_id)
 
             # Update log
-            pos_executor.update_log(run_id=ti.run_id, status="FAILED")
-            snow_executor.update_log(run_id=ti.run_id, status="FAILED")
+            pos_executor.update('logs', where=['run_id'], run_id=run_id, status="FAILED", end_time = current_time())
+            snow_executor.update('logs', where=['run_id'], run_id=run_id, status="FAILED", end_time = current_time())
         raise    
 
 def upload_to_s3(executors: dict, client, source_path, destination_path, **context):
     """TODO
     - Need to add `try except` here to handle retries and log updates
+    - Check if they already exist, if they do, replace or skip?
     """
     ti = context['ti']
     bucket_name = ti.xcom_pull(task_ids='fetch_metadata', key='s3_bucket')
@@ -255,6 +252,7 @@ def load_s3_to_postgres(executors: dict, client, source_path, destination_path, 
     """
     
     ti = context['ti']
+    run_id = ti.run_id
     pos_executor: PostgresExecutor = executors['postgres']
     bucket_name = ti.xcom_pull(task_ids='fetch_metadata', key='s3_bucket')
     batch_insert_size = ti.xcom_pull(task_ids='fetch_metadata', key='load_batchsize')
@@ -288,11 +286,10 @@ def load_s3_to_postgres(executors: dict, client, source_path, destination_path, 
 
                 # Clear persistent states from xcom
                 logger.info("Clearing XCom state")
-                XCom.clear(dag_id=ti.dag_id, run_id=ti.run_id, task_id=ti.task_id)
+                XCom.clear(dag_id=ti.dag_id, run_id=run_id, task_id=ti.task_id)
 
                 # Update log
-                pos_executor.update_log(run_id=ti.run_id, status="FAILED")
-
+                pos_executor.update('logs', where=['run_id'], run_id=run_id, status="FAILED", end_time = current_time())
             raise
 
         # Checkpoint
@@ -307,6 +304,7 @@ def load_s3_to_snowflake(executors: dict, client, source_path, destination_path,
     """This task loads data from s3 to snowflake"""
 
     ti = context['ti']
+    run_id = ti.run_id
     snow_executor: SnowflakeExecutor = executors['snowflake']
     bucket_name = ti.xcom_pull(task_ids='fetch_metadata', key='s3_bucket')
     batch_insert_size = ti.xcom_pull(task_ids='fetch_metadata', key='load_batchsize')
@@ -341,11 +339,10 @@ def load_s3_to_snowflake(executors: dict, client, source_path, destination_path,
 
                 # Clear persistent states from xcom
                 logger.info("Clearing XCom state")
-                XCom.clear(dag_id=ti.dag_id, run_id=ti.run_id, task_id=ti.task_id)
+                XCom.clear(dag_id=ti.dag_id, run_id=run_id, task_id=ti.task_id)
 
                 # Update log
-                snow_executor.update_log(run_id=ti.run_id, status="FAILED")
-
+                snow_executor.update('logs', where=['run_id'], run_id=run_id, status="FAILED", end_time = current_time())
             raise
 
         # Checkpoint
@@ -356,9 +353,10 @@ def load_s3_to_snowflake(executors: dict, client, source_path, destination_path,
     if Path(destination_path).exists() and Path(destination_path).is_dir():
         shutil.rmtree(destination_path)
     
-
 def update_metdata(executors: dict, **context):
+
     ti = context['ti']
+    run_id = ti.run_id
     pos_executor: PostgresExecutor = executors['postgres']
     snow_executor: SnowflakeExecutor = executors['snowflake']
 
@@ -373,8 +371,8 @@ def update_metdata(executors: dict, **context):
 
     status = 'FAILED' if failed_task else 'SUCCESS'
 
-    pos_executor.update_log(run_id=ti.run_id, status=status)
-    snow_executor.update_log(run_id=ti.run_id, status=status)
+    pos_executor.update('logs', where=['run_id'], run_id=run_id, status=status, end_time = current_time())
+    snow_executor.update('logs', where=['run_id'], run_id=run_id, status=status, end_time = current_time())
 
 def validate_sync(executors: dict, **context):
     """ Check if dbs are in sync else trigger a run to sync up dbs"""
@@ -390,11 +388,10 @@ def validate_sync(executors: dict, **context):
     pos_load_date = set(pos_executor.get_load_date_from_logs())
     snow_load_date = set(snow_executor.get_load_date_from_logs())
 
-    # Error in xcom since it is not able to serialize below objects, need to find a way
     pos_missed_dates = list(snow_load_date - pos_load_date)
     snow_missed_dates = list(pos_load_date - snow_load_date)
 
-    # Normalize dates into string to be serializable
+    # Normalize date object to string to be serializable
     pos_missed_dates = [d[0].strftime("%Y-%m-%d") for d in pos_missed_dates]
     snow_missed_dates = [d[0].strftime("%Y-%m-%d") for d in snow_missed_dates]
 
@@ -500,6 +497,8 @@ def sync_snowflake_db(executors, client, source_path, destination_path, configs,
         if Path(destination_path).exists() and Path(destination_path).is_dir():
             shutil.rmtree(destination_path)
 
+# Credentials
+
 db_params = {
     "host": 'host.docker.internal',
     "port": '5433',
@@ -532,25 +531,33 @@ aws_params = {
     "region" : os.getenv("AWS_REGION")
 }
 
-# Define seperate DB executors for each, Postgres and Snowflake
+client = create_aws_conn(resource='s3', **aws_params)
+
+# Path variables
 tmp = "./tmp"
 s3_destination = "raw/"
 postgres_template_path = "./include/sql/postgres"
 snowflake_template_path = "./include/sql/snowflake"
 
+# DB Executors
 postgres_db = PostgresExecutor(**db_params, template_path=postgres_template_path)
 snowflake_db = PostgresExecutor(**sn_params, template_path=postgres_template_path)
 
 # Temporarily down for maintenance 
 # snowflake_db = SnowflakeExecutor(**snow_params, template_path=snowflake_template_path)
 
-client = create_aws_conn(resource='s3', **aws_params)
-
 executors = dict(postgres=postgres_db, snowflake=snowflake_db)
+
+# ETL params
 config = {
     "bucket_name" : "crime-etl-bucket",
     "ingest_batchsize" : 5000,
     "load_batchsize": 1000,
+}
+
+default_args = {
+    "retries" : 3,
+    "retry_delay" : timedelta(seconds=10),
 }
 
 with DAG(
@@ -612,8 +619,7 @@ with DAG(
         trigger_rule = TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS
     )
 
-    # Load from s3 to DBs
-    # - Snowflake
+    # Load from s3 to Snowflake
     load_snowflake = PythonOperator(
         task_id="load_from_s3_to_snowflake",
         python_callable=load_s3_to_snowflake,
@@ -625,7 +631,7 @@ with DAG(
         }
     ) 
 
-    # - Postgres
+    # Load from s3 to Postgres
     load_postgres = PythonOperator(
         task_id="load_from_s3_to_postgres",
         python_callable=load_s3_to_postgres,
@@ -637,6 +643,7 @@ with DAG(
         }
     ) 
 
+    # Update run to metastore
     update_metadata = PythonOperator(
         task_id="update_metadata",
         python_callable=update_metdata,
@@ -655,6 +662,7 @@ with DAG(
         }
     )
 
+    # Sync postgres
     sync_postgres = PythonOperator(
         task_id = "sync_postgres",
         python_callable=sync_postgres_db,
@@ -667,6 +675,7 @@ with DAG(
         }
     )
 
+    # Sync snowflake
     sync_snowflake = PythonOperator(
         task_id = "sync_snowflake",
         python_callable=sync_snowflake_db,
@@ -679,7 +688,8 @@ with DAG(
         }
     )
 
-    # After sync, need to update the metadata table but what about the run_id, use the same one?
-    # So we fixed loading the missing data from either of the dbs, but need some sort of tracker to know that the date we ingested is successful so we can probably modify the ingested_at in the metastore but what about the run_id, how do we get that? the missing load_date was performed in the current run so, missing load_date X was performed on run_id A on load_date Y
-
-    check_table >> check_metadata  >> [full_data_load, incremental_data_load]  >> upload_s3 >> [load_postgres, load_snowflake] >> update_metadata >> validate >> [sync_postgres, sync_snowflake]
+    
+    check_table >> check_metadata
+    check_metadata >> [full_data_load, incremental_data_load] >> upload_s3 
+    upload_s3 >> [load_postgres, load_snowflake] >> update_metadata 
+    update_metadata >> validate >> [sync_postgres, sync_snowflake]

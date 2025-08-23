@@ -83,6 +83,13 @@ class PostgresExecutor:
             last_load_date = conn.execute(query).scalar()
             return last_load_date  
     
+    def init_log(self, run_id: str, config: dict):
+        self.__set_run_log(run_id, config)
+        last_source_update = self.__get_last_source_updated_on()
+        last_load_date = self.__get_last_ingest_date_from_log()
+
+        return (last_source_update, last_load_date)  
+
     def create_table(self, sql: str):
         """Create Table"""
 
@@ -148,101 +155,6 @@ class PostgresExecutor:
             results = conn.execute(query).fetchall()
             return results
 
-    def init_log(self, run_id: str, config: dict):
-        self.__set_run_log(run_id, config)
-        last_source_update = self.__get_last_source_updated_on()
-        last_load_date = self.__get_last_ingest_date_from_log()
-
-        return (last_source_update, last_load_date)        
-    
-    # def insert_log(self, run_id, load_date = None, **params):
-    #     # What params are mandatory
-    #     # run_id, load_date
-
-    #     values = {
-    #         'run_id' : run_id,
-    #         'load_date' : datetime.now(timezone.utc).strftime('%Y-%m-%d'),
-    #         'start_time' : datetime.now(timezone.utc).strftime("%H:%M:%S"),
-    #         'status' : 'RUNNING',
-    #     }
-
-    #     # Filter by params
-    #     if load_date:
-    #         # Update if performing a recovery
-    #         values.update({'load_date': load_date})
-
-    #     if params.get('type'):
-    #         # SCHEDULED or RECOVERY
-    #         values.update({'type': params.get('type')})
-
-    #     if params.get('mode'):
-    #         # INCREMENTAL OR FULL
-    #         values.update({'mode': params.get('mode')})
-
-    #     if params.get('end_time'):
-    #         values.update({'end_time': params.get('end_time')})
-
-    #     if params.get('source_updated_on'):
-    #         # Most recent date from crime data
-    #         values.update({'source_updated_on': params.get('source_updated_on')})
-
-    #     if params.get('status'):
-    #         # SUCCESS, RUNNING, FAILURE
-    #         values.update({'status': params.get('status')})
-
-    #     if params.get('config'):
-    #         # Additional
-    #         values.update({'config': params.get('config')})
-
-    #     set_clause = ", ".join(values.keys())
-    #     val_clause = ", ".join([f':{k}' for k in values.keys()])
-
-    #     with self.engine.begin() as conn:
-    #         query = text(f"""
-    #             INSERT INTO logs({set_clause})
-    #             VALUES ({val_clause})
-    #         """)
-
-    #         conn.execute(query)
-    
-    # This is not flexible and only updates on run_id, what if there were more than one primary key or where clause
-    def update_log(self, run_id: str, load_date: str = None, type: str = None, status : str = None, mode: str = None, source_updated_on: datetime = None):
-        values = {
-            'run_id' : run_id
-        }
-
-        if status and status.upper() in ["SUCCESS", "FAILED"]:
-            values.update({
-                'status' : status,
-                'end_time' : datetime.now(timezone.utc).strftime("%H:%M:%S"),
-                }
-            )
-
-        if mode:
-            values.update({'mode' : mode})
-        
-        if type:
-            values.update({'type' : type})
-
-        if load_date:
-            # Convert date to datetime then update values
-            values.update({'load_date' : datetime.strptime(load_date, "%Y-%m-%d")})
-
-        if source_updated_on:
-            values.update({'source_updated_on' : source_updated_on})
-        
-        set_values = ", ".join([f"{k} = :{k}" for k in values.keys() if k != 'run_id'])
-
-        with self.engine.begin() as conn:
-            query = text(f"""
-                UPDATE logs
-                SET
-                    {set_values}
-                WHERE run_id = :run_id
-            """)
-
-            conn.execute(query, values)
-    
     def load_crime_data(self, batchsize: int, df: pd.DataFrame):
         """ Performs batch insert to Table 'crime' """
 

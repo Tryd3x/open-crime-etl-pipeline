@@ -4,7 +4,7 @@ import gzip
 import shutil
 import logging
 from pathlib import Path
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from dateutil.relativedelta import relativedelta
 
 logger = logging.getLogger(__name__)
@@ -15,7 +15,10 @@ def str_to_date(str_date: str, format: str = '%Y-%m-%dT%H:%M:%S.%f') -> datetime
 def date_to_str(date: datetime, format: str = '%Y-%m-%dT%H:%M:%S.%f') -> str:
     return date.strftime(format)[:-3]
 
-def create_filter(param):
+def current_time():
+    return datetime.now(timezone.utc).strftime('%H:%M:%S')
+
+def create_filter(param: str | date) -> str:
     # This code is prone to break if it depends on the param type, bad practise >:(
     if isinstance(param, date):
         # Normal Ingestion, generate date range
