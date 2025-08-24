@@ -1,0 +1,24 @@
+crime_dbt_postgres:
+  outputs:
+    dev:
+      dbname: crime_db
+      host: host.docker.internal
+      pass: admin
+      port: 5433
+      schema: public
+      threads: 4
+      type: postgres
+      user: admin
+  target: dev
+crime_dbt_snowflake:
+  outputs:
+    dev:
+      dbname: snowflake_db
+      host: host.docker.internal
+      pass: admin
+      port: 5433
+      schema: public
+      threads: 4
+      type: postgres
+      user: admin
+  target: dev

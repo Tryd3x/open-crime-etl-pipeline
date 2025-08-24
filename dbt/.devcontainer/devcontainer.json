@@ -1,0 +1,27 @@
+{
+    "name": "crime_dbt - Dev Container",
+    "build": {
+        "dockerfile": "dbt-base.dockerfile",
+        "args": {
+            "dbt_core_version": "1.7.1",
+            "dbt_postgres_version": "1.7.1",
+            "dbt_snowflake_version": "1.7.1"
+        }
+    },
+
+    // Directs VSCode to open that folder in its workspace
+    "workspaceFolder": "/workspace",
+    
+    // Single Mount
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+    
+    // Additional mounts can be added this way
+    // "mounts": [
+    //     "source=,target=,type=bind"
+    // ],
+
+    // Set environment variable inside the container
+    "remoteEnv": {
+        "DBT_PROFILES_DIR": "/workspace/profiles"
+    }
+}
